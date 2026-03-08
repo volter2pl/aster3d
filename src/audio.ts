@@ -64,6 +64,46 @@ export class AudioManager {
     };
   }
 
+  public playEnemyShot(): void {
+    const context = this.ensureContext();
+    if (context.state !== "running" || !this.master) {
+      return;
+    }
+
+    const now = context.currentTime;
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    const filter = context.createBiquadFilter();
+
+    oscillator.type = "square";
+    oscillator.frequency.setValueAtTime(260, now);
+    oscillator.frequency.exponentialRampToValueAtTime(130, now + 0.16);
+
+    filter.type = "bandpass";
+    filter.frequency.setValueAtTime(760, now);
+    filter.Q.value = 0.9;
+
+    this.applyEnvelope(gain, now, {
+      attack: 0.002,
+      decay: 0.05,
+      sustain: 0.22,
+      release: 0.08,
+      peak: 0.055,
+    });
+
+    oscillator.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.master);
+
+    oscillator.start(now);
+    oscillator.stop(now + 0.18);
+    oscillator.onended = () => {
+      oscillator.disconnect();
+      filter.disconnect();
+      gain.disconnect();
+    };
+  }
+
   public playExplosion(intensity: number): void {
     const context = this.ensureContext();
     if (context.state !== "running" || !this.master || !this.noiseBuffer) {

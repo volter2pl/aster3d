@@ -26,6 +26,8 @@ type Bullet = {
   velocity: Vector3;
   life: number;
   radius: number;
+  hostile: boolean;
+  damage: number;
 };
 
 type Explosion = {
@@ -70,12 +72,28 @@ type SectorData = {
   y: number;
   z: number;
   asteroids: Asteroid[];
+  enemies: Enemy[];
 };
 
 type Collectible = {
   mesh: Mesh;
   pulse: number;
   position: Vector3;
+  objective: boolean;
+};
+
+type EnemyState = "pursuit" | "attack" | "recover";
+
+type Enemy = {
+  root: TransformNode;
+  velocity: Vector3;
+  radius: number;
+  health: number;
+  fireCooldown: number;
+  recoverTimer: number;
+  strafeSign: number;
+  state: EnemyState;
+  sectorKey: string | null;
 };
 
 const WORLD_SECTOR_SIZE = 220;
@@ -92,6 +110,13 @@ const OBJECTIVE_MAX_DISTANCE = 760;
 const BOOST_MAX = 100;
 const BOOST_DRAIN_PER_SECOND = 58;
 const BOOST_REGEN_PER_SECOND = 18;
+const ENEMY_ATTACK_RANGE = 165;
+const ENEMY_MAX_SPEED = 33;
+const ENEMY_BULLET_SPEED = 92;
+const ENEMY_COLLISION_RADIUS = 2.8;
+const ENEMY_VIEW_DISTANCE = WORLD_SECTOR_SIZE * (WORLD_UNLOAD_RADIUS + 1.2);
+const ASTEROID_SALVAGE_DROP_CHANCE = 0.2;
+const ENEMY_SALVAGE_DROP_CHANCE = 0.4;
 
 export class Aster3DGame {
   private readonly canvas: HTMLCanvasElement;
@@ -107,8 +132,10 @@ export class Aster3DGame {
   private readonly loadedSectors = new Map<string, SectorData>();
 
   private readonly asteroids: Asteroid[] = [];
+  private readonly enemies: Enemy[] = [];
   private readonly bullets: Bullet[] = [];
   private readonly explosions: Explosion[] = [];
+  private readonly collectibles: Collectible[] = [];
 
   private mouseLookX = 0;
   private mouseLookY = 0;
@@ -128,7 +155,6 @@ export class Aster3DGame {
 
   private readonly shipVelocity = new Vector3(0, 0, 0);
   private readonly controlSettings: ControlSettings;
-  private objective: Collectible | null = null;
   private objectiveDirection = new Vector3(0.24, 0.08, 0.97).normalize();
 
   constructor(root: HTMLElement) {
@@ -302,6 +328,7 @@ export class Aster3DGame {
 
     this.syncWorldSectors();
     this.updateShip(dt);
+    this.updateEnemies(dt);
     this.updateBullets(dt);
     this.updateAsteroids(dt);
     this.updateObjective(dt);
@@ -375,6 +402,22 @@ export class Aster3DGame {
         continue;
       }
 
+      if (bullet.hostile) {
+        const collisionRadius = SHIP_COLLISION_RADIUS + bullet.radius;
+        if (
+          Vector3.DistanceSquared(this.shipRoot.position, bullet.mesh.position) <=
+          collisionRadius * collisionRadius
+        ) {
+          if (this.invulnerability === 0) {
+            this.applyShipDamage(bullet.damage);
+            this.spawnExplosion(bullet.mesh.position, 1.8, new Color3(1, 0.42, 0.24));
+            this.audio.playExplosion(0.54);
+          }
+          this.disposeBullet(index);
+        }
+        continue;
+      }
+
       let bulletDestroyed = false;
       for (let asteroidIndex = this.asteroids.length - 1; asteroidIndex >= 0; asteroidIndex -= 1) {
         const asteroid = this.asteroids[asteroidIndex];
@@ -393,6 +436,109 @@ export class Aster3DGame {
 
       if (bulletDestroyed) {
         continue;
+      }
+
+      for (let enemyIndex = this.enemies.length - 1; enemyIndex >= 0; enemyIndex -= 1) {
+        const enemy = this.enemies[enemyIndex];
+        const collisionRadius = enemy.radius + bullet.radius;
+        if (
+          Vector3.DistanceSquared(bullet.mesh.position, enemy.root.position) <=
+          collisionRadius * collisionRadius
+        ) {
+          this.damageEnemy(enemyIndex, bullet.velocity);
+          this.disposeBullet(index);
+          bulletDestroyed = true;
+          break;
+        }
+      }
+
+      if (bulletDestroyed) {
+        continue;
+      }
+    }
+  }
+
+  private updateEnemies(dt: number): void {
+    for (let index = this.enemies.length - 1; index >= 0; index -= 1) {
+      const enemy = this.enemies[index];
+      enemy.fireCooldown = Math.max(0, enemy.fireCooldown - dt);
+      enemy.recoverTimer = Math.max(0, enemy.recoverTimer - dt);
+      const modelForwardAxis = Vector3.Backward(this.scene.useRightHandedSystem);
+
+      if (
+        enemy.sectorKey === null &&
+        Vector3.DistanceSquared(this.shipRoot.position, enemy.root.position) > ENEMY_VIEW_DISTANCE ** 2
+      ) {
+        this.disposeEnemy(enemy);
+        this.enemies.splice(index, 1);
+        continue;
+      }
+
+      const toShip = this.shipRoot.position.subtract(enemy.root.position);
+      const distance = Math.max(0.001, toShip.length());
+      const currentForward = enemy.root.getDirection(modelForwardAxis).normalize();
+      const currentUp = enemy.root.getDirection(Vector3.Up()).normalize();
+      const currentRight = enemy.root.getDirection(Vector3.Right()).normalize();
+      const toShipDirection = toShip.scale(1 / distance);
+      const forwardDot = Vector3.Dot(currentForward, toShipDirection);
+
+      let desiredDirection = toShipDirection;
+      if (enemy.recoverTimer > 0) {
+        enemy.state = "recover";
+        desiredDirection = toShipDirection.scale(-1).add(currentRight.scale(enemy.strafeSign * 0.72)).normalize();
+      } else if (distance < 42 && forwardDot > 0.64) {
+        enemy.state = "recover";
+        enemy.recoverTimer = randomBetween(1.1, 1.8);
+        desiredDirection = toShipDirection.scale(-1).add(currentRight.scale(enemy.strafeSign * 0.72)).normalize();
+      } else if (distance <= ENEMY_ATTACK_RANGE) {
+        enemy.state = "attack";
+      } else {
+        enemy.state = "pursuit";
+      }
+
+      const targetRotation = this.scene.useRightHandedSystem
+        ? Quaternion.FromLookDirectionRH(desiredDirection.scale(-1), currentUp)
+        : Quaternion.FromLookDirectionLH(desiredDirection.scale(-1), currentUp);
+      const rotation = enemy.root.rotationQuaternion ?? Quaternion.Identity();
+      enemy.root.rotationQuaternion = Quaternion.Slerp(rotation, targetRotation, 1 - Math.exp(-1.9 * dt)).normalize();
+
+      const noseDirection = enemy.root.getDirection(modelForwardAxis).normalize();
+      const thrust =
+        enemy.state === "recover"
+          ? 24
+          : enemy.state === "attack"
+            ? 16
+            : 20;
+      enemy.velocity.addInPlace(noseDirection.scale(thrust * dt));
+      enemy.velocity.scaleInPlace(Math.exp(-1.05 * dt));
+      if (enemy.velocity.lengthSquared() > ENEMY_MAX_SPEED * ENEMY_MAX_SPEED) {
+        enemy.velocity.normalize().scaleInPlace(ENEMY_MAX_SPEED);
+      }
+      enemy.root.position.addInPlace(enemy.velocity.scale(dt));
+
+      const toShipAfterMove = this.shipRoot.position.subtract(enemy.root.position);
+      const distanceAfterMove = Math.max(0.001, toShipAfterMove.length());
+      const attackDirection = toShipAfterMove.scale(1 / distanceAfterMove);
+
+      if (
+        enemy.state === "attack" &&
+        distanceAfterMove <= ENEMY_ATTACK_RANGE &&
+        enemy.fireCooldown === 0
+      ) {
+        const aimDirection = attackDirection.add(this.shipVelocity.scale(0.012)).normalize();
+        this.fireEnemyBullet(enemy, aimDirection);
+        enemy.fireCooldown = randomBetween(0.92, 1.28);
+      }
+
+      const collisionRadius = enemy.radius + SHIP_COLLISION_RADIUS;
+      if (
+        this.invulnerability === 0 &&
+        Vector3.DistanceSquared(this.shipRoot.position, enemy.root.position) <= collisionRadius * collisionRadius
+      ) {
+        this.applyShipDamage(20);
+        this.damageEnemy(index, this.shipVelocity.add(currentForward.scale(10)), true);
+        this.spawnExplosion(enemy.root.position, enemy.radius * 0.9, new Color3(1, 0.34, 0.26));
+        this.audio.playExplosion(0.8);
       }
     }
   }
@@ -473,6 +619,34 @@ export class Aster3DGame {
       velocity: forward.scale(BULLET_SPEED).add(this.shipVelocity.scale(0.45)),
       life: 1.6,
       radius: 0.4,
+      hostile: false,
+      damage: 1,
+    });
+  }
+
+  private fireEnemyBullet(enemy: Enemy, direction: Vector3): void {
+    this.audio.playEnemyShot();
+
+    const bulletMaterial = new StandardMaterial(`enemy-bullet-mat-${performance.now()}`, this.scene);
+    bulletMaterial.disableLighting = true;
+    bulletMaterial.emissiveColor = new Color3(1, 0.42, 0.18);
+    bulletMaterial.diffuseColor = new Color3(1, 0.2, 0.12);
+
+    const bulletMesh = MeshBuilder.CreateSphere(
+      `enemy-bullet-${performance.now()}`,
+      { diameter: 0.58, segments: 6 },
+      this.scene,
+    );
+    bulletMesh.material = bulletMaterial;
+    bulletMesh.position.copyFrom(enemy.root.position.add(direction.scale(enemy.radius + 1.1)));
+
+    this.bullets.push({
+      mesh: bulletMesh,
+      velocity: direction.scale(ENEMY_BULLET_SPEED).add(enemy.velocity.scale(0.55)),
+      life: 2.8,
+      radius: 0.58,
+      hostile: true,
+      damage: 13,
     });
   }
 
@@ -498,6 +672,9 @@ export class Aster3DGame {
     this.asteroids.splice(index, 1);
     this.spawnExplosion(impactPosition, asteroid.size * 0.9, new Color3(1, 0.68, 0.34));
     this.audio.playExplosion(asteroid.size * 0.24);
+    if (Math.random() < ASTEROID_SALVAGE_DROP_CHANCE) {
+      this.spawnAsteroidSalvage(impactPosition);
+    }
 
     if (nextSize > 1.65) {
       const splitDirection = randomUnitVector();
@@ -512,6 +689,32 @@ export class Aster3DGame {
         asteroidVelocity.add(splitDirection.scale(-8)),
       );
     }
+  }
+
+  private damageEnemy(index: number, impulse: Vector3, collisionKill = false): void {
+    const enemy = this.enemies[index];
+    enemy.health -= collisionKill ? 99 : 1;
+    if (impulse.lengthSquared() > 0.001) {
+      enemy.velocity.addInPlace(impulse.normalize().scale(4.8));
+    }
+
+    this.spawnExplosion(enemy.root.position, enemy.radius * 0.55, new Color3(1, 0.48, 0.26));
+
+    if (enemy.health > 0) {
+      this.audio.playExplosion(0.58);
+      enemy.recoverTimer = Math.max(enemy.recoverTimer, 0.75);
+      return;
+    }
+
+    this.score += 180;
+    this.detachEnemyFromSector(enemy);
+    this.spawnExplosion(enemy.root.position, enemy.radius * 1.15, new Color3(1, 0.24, 0.22));
+    this.audio.playExplosion(0.92);
+    if (Math.random() < ENEMY_SALVAGE_DROP_CHANCE) {
+      this.spawnAsteroidSalvage(enemy.root.position.clone());
+    }
+    this.disposeEnemy(enemy);
+    this.enemies.splice(index, 1);
   }
 
   private applyShipDamage(amount: number): void {
@@ -574,7 +777,13 @@ export class Aster3DGame {
     const key = sectorKey(x, y, z);
     const rng = mulberry32(hashSector(this.worldSeed, x, y, z));
     const asteroidCount = 1 + (rng() > 0.35 ? 1 : 0) + (rng() > 0.88 ? 1 : 0);
-    const sector: SectorData = { key, x, y, z, asteroids: [] };
+    const sector: SectorData = { key, x, y, z, asteroids: [], enemies: [] };
+    const sectorCenter = new Vector3(
+      x * WORLD_SECTOR_SIZE + WORLD_SECTOR_SIZE * 0.5,
+      y * WORLD_SECTOR_SIZE + WORLD_SECTOR_SIZE * 0.5,
+      z * WORLD_SECTOR_SIZE + WORLD_SECTOR_SIZE * 0.5,
+    );
+    const sectorDistanceToShip = Vector3.Distance(this.shipRoot.position, sectorCenter);
 
     for (let index = 0; index < asteroidCount; index += 1) {
       const position = new Vector3(
@@ -593,6 +802,29 @@ export class Aster3DGame {
       sector.asteroids.push(asteroid);
     }
 
+    if (sectorDistanceToShip > 80) {
+      const enemySpawnChance =
+        sectorDistanceToShip < 240
+          ? 0.82
+          : sectorDistanceToShip < 420
+            ? 0.62
+            : 0.4;
+      const enemyCount =
+        rng() < enemySpawnChance
+          ? 1 + (sectorDistanceToShip < 340 && rng() > 0.45 ? 1 : 0) + (sectorDistanceToShip < 220 && rng() > 0.82 ? 1 : 0)
+          : 0;
+
+      for (let index = 0; index < enemyCount; index += 1) {
+        const enemyPosition = new Vector3(
+          x * WORLD_SECTOR_SIZE + rng() * WORLD_SECTOR_SIZE,
+          y * WORLD_SECTOR_SIZE + rng() * WORLD_SECTOR_SIZE,
+          z * WORLD_SECTOR_SIZE + rng() * WORLD_SECTOR_SIZE,
+        );
+        const enemy = this.spawnEnemy(enemyPosition, key, rng);
+        sector.enemies.push(enemy);
+      }
+    }
+
     this.loadedSectors.set(key, sector);
   }
 
@@ -607,6 +839,14 @@ export class Aster3DGame {
       const index = this.asteroids.indexOf(asteroid);
       if (index >= 0) {
         this.asteroids.splice(index, 1);
+      }
+    }
+
+    for (const enemy of sector.enemies) {
+      this.disposeEnemy(enemy);
+      const index = this.enemies.indexOf(enemy);
+      if (index >= 0) {
+        this.enemies.splice(index, 1);
       }
     }
 
@@ -661,6 +901,160 @@ export class Aster3DGame {
 
     this.asteroids.push(asteroid);
     return asteroid;
+  }
+
+  private spawnEnemy(position: Vector3, sectorKeyValue: string | null = null, rng: () => number = Math.random): Enemy {
+    const root = new TransformNode(`enemy-${performance.now()}`, this.scene);
+    root.position.copyFrom(position);
+    const initialDirection = randomUnitVector();
+    root.rotationQuaternion = this.scene.useRightHandedSystem
+      ? Quaternion.FromLookDirectionRH(initialDirection.scale(-1), Vector3.Up())
+      : Quaternion.FromLookDirectionLH(initialDirection.scale(-1), Vector3.Up());
+
+    const hullMaterial = new StandardMaterial(`enemy-hull-${performance.now()}`, this.scene);
+    hullMaterial.diffuseColor = new Color3(0.2, 0.23, 0.3);
+    hullMaterial.emissiveColor = new Color3(0.04, 0.05, 0.08);
+    hullMaterial.specularColor = new Color3(0.08, 0.08, 0.08);
+
+    const accentMaterial = new StandardMaterial(`enemy-accent-${performance.now()}`, this.scene);
+    accentMaterial.disableLighting = true;
+    accentMaterial.emissiveColor = new Color3(1, 0.16, 0.12);
+    accentMaterial.diffuseColor = new Color3(0.95, 0.22, 0.18);
+
+    const engineMaterial = new StandardMaterial(`enemy-engine-${performance.now()}`, this.scene);
+    engineMaterial.disableLighting = true;
+    engineMaterial.emissiveColor = new Color3(0.26, 0.88, 1);
+    engineMaterial.diffuseColor = new Color3(0.16, 0.56, 0.88);
+
+    const hull = MeshBuilder.CreateBox(
+      `enemy-hull-${performance.now()}`,
+      { width: 1.35, height: 0.72, depth: 2.9 },
+      this.scene,
+    );
+    hull.parent = root;
+    hull.position.z = 0.08;
+    hull.material = hullMaterial;
+
+    const canopy = MeshBuilder.CreateBox(
+      `enemy-canopy-${performance.now()}`,
+      { width: 0.76, height: 0.24, depth: 0.78 },
+      this.scene,
+    );
+    canopy.parent = root;
+    canopy.position.set(0, 0.34, 0.86);
+    canopy.material = accentMaterial;
+
+    const nose = MeshBuilder.CreateCylinder(
+      `enemy-nose-${performance.now()}`,
+      { height: 1.28, diameterTop: 0.12, diameterBottom: 0.72, tessellation: 4 },
+      this.scene,
+    );
+    nose.parent = root;
+    nose.rotation.x = Math.PI * 0.5;
+    nose.position.set(0, 0.02, 2.02);
+    nose.material = accentMaterial;
+
+    const leftWing = MeshBuilder.CreateBox(
+      `enemy-wing-l-${performance.now()}`,
+      { width: 1.9, height: 0.12, depth: 0.9 },
+      this.scene,
+    );
+    leftWing.parent = root;
+    leftWing.position.set(-1.55, -0.02, -0.2);
+    leftWing.rotation.z = 0.1;
+    leftWing.material = hullMaterial;
+
+    const rightWing = MeshBuilder.CreateBox(
+      `enemy-wing-r-${performance.now()}`,
+      { width: 1.9, height: 0.12, depth: 0.9 },
+      this.scene,
+    );
+    rightWing.parent = root;
+    rightWing.position.set(1.55, -0.02, -0.2);
+    rightWing.rotation.z = -0.1;
+    rightWing.material = hullMaterial;
+
+    const leftPylon = MeshBuilder.CreateBox(
+      `enemy-pylon-l-${performance.now()}`,
+      { width: 0.28, height: 0.3, depth: 2.1 },
+      this.scene,
+    );
+    leftPylon.parent = root;
+    leftPylon.position.set(-1.02, 0, 0.08);
+    leftPylon.material = hullMaterial;
+
+    const rightPylon = MeshBuilder.CreateBox(
+      `enemy-pylon-r-${performance.now()}`,
+      { width: 0.28, height: 0.3, depth: 2.1 },
+      this.scene,
+    );
+    rightPylon.parent = root;
+    rightPylon.position.set(1.02, 0, 0.08);
+    rightPylon.material = hullMaterial;
+
+    const dorsalFin = MeshBuilder.CreateBox(
+      `enemy-fin-${performance.now()}`,
+      { width: 0.18, height: 0.78, depth: 1.1 },
+      this.scene,
+    );
+    dorsalFin.parent = root;
+    dorsalFin.position.set(0, 0.54, -0.92);
+    dorsalFin.material = hullMaterial;
+
+    const gunLeft = MeshBuilder.CreateCylinder(
+      `enemy-gun-l-${performance.now()}`,
+      { height: 1.05, diameter: 0.16, tessellation: 6 },
+      this.scene,
+    );
+    gunLeft.parent = root;
+    gunLeft.rotation.x = Math.PI * 0.5;
+    gunLeft.position.set(-0.86, -0.12, 1.58);
+    gunLeft.material = accentMaterial;
+
+    const gunRight = MeshBuilder.CreateCylinder(
+      `enemy-gun-r-${performance.now()}`,
+      { height: 1.05, diameter: 0.16, tessellation: 6 },
+      this.scene,
+    );
+    gunRight.parent = root;
+    gunRight.rotation.x = Math.PI * 0.5;
+    gunRight.position.set(0.86, -0.12, 1.58);
+    gunRight.material = accentMaterial;
+
+    const engineLeft = MeshBuilder.CreateCylinder(
+      `enemy-engine-l-${performance.now()}`,
+      { height: 0.82, diameter: 0.52, tessellation: 8 },
+      this.scene,
+    );
+    engineLeft.parent = root;
+    engineLeft.rotation.x = Math.PI * 0.5;
+    engineLeft.position.set(-0.84, -0.02, -1.88);
+    engineLeft.material = engineMaterial;
+
+    const engineRight = MeshBuilder.CreateCylinder(
+      `enemy-engine-r-${performance.now()}`,
+      { height: 0.82, diameter: 0.52, tessellation: 8 },
+      this.scene,
+    );
+    engineRight.parent = root;
+    engineRight.rotation.x = Math.PI * 0.5;
+    engineRight.position.set(0.84, -0.02, -1.88);
+    engineRight.material = engineMaterial;
+
+    const enemy: Enemy = {
+      root,
+      velocity: randomUnitVector().scale(randomBetween(2, 8, rng)),
+      radius: ENEMY_COLLISION_RADIUS,
+      health: 4,
+      fireCooldown: randomBetween(0.45, 1.2, rng),
+      recoverTimer: 0,
+      strafeSign: rng() > 0.5 ? 1 : -1,
+      state: "pursuit",
+      sectorKey: sectorKeyValue,
+    };
+
+    this.enemies.push(enemy);
+    return enemy;
   }
 
   private spawnExplosion(position: Vector3, radius: number, color: Color3): void {
@@ -747,11 +1141,15 @@ export class Aster3DGame {
   }
 
   private clearWorld(): void {
-    this.disposeObjective();
+    this.clearCollectibles();
     for (const asteroid of [...this.asteroids]) {
       this.disposeAsteroid(asteroid);
     }
+    for (const enemy of [...this.enemies]) {
+      this.disposeEnemy(enemy);
+    }
     this.asteroids.length = 0;
+    this.enemies.length = 0;
     this.loadedSectors.clear();
   }
 
@@ -776,72 +1174,142 @@ export class Aster3DGame {
     sector.asteroids = sector.asteroids.filter((candidate) => candidate !== asteroid);
   }
 
-  private updateObjective(dt: number): void {
-    if (!this.objective) {
+  private disposeEnemy(enemy: Enemy): void {
+    const materials = new Set<StandardMaterial>();
+    for (const mesh of enemy.root.getChildMeshes()) {
+      if (mesh.material instanceof StandardMaterial) {
+        materials.add(mesh.material);
+      }
+      mesh.dispose();
+    }
+    enemy.root.dispose();
+    for (const material of materials) {
+      material.dispose();
+    }
+  }
+
+  private detachEnemyFromSector(enemy: Enemy): void {
+    if (!enemy.sectorKey) {
       return;
     }
 
-    this.objective.pulse += dt;
-    const bob = 1 + Math.sin(this.objective.pulse * 3.2) * 0.12;
-    this.objective.mesh.scaling.setAll(bob);
-    this.objective.mesh.rotation.y += dt * 1.4;
-    this.objective.mesh.rotation.x += dt * 0.5;
+    const sector = this.loadedSectors.get(enemy.sectorKey);
+    if (!sector) {
+      return;
+    }
 
-    if (
-      Vector3.DistanceSquared(this.shipRoot.position, this.objective.position) <=
-      COLLECTIBLE_PICKUP_RADIUS * COLLECTIBLE_PICKUP_RADIUS
-    ) {
-      this.collectedSalvage += 1;
-      this.score += 120;
-      this.audio.playPickup();
-      const nextAnchor = this.objective.position.clone();
-      this.spawnExplosion(this.objective.position, 3.8, new Color3(0.38, 1, 0.72));
-      this.audio.playExplosion(0.72);
-      this.disposeObjective();
-      this.spawnNextObjective(nextAnchor, false);
-      this.setStatus(`Salvage secured. Cargo ${this.collectedSalvage}. Next marker locked.`, 2.4);
+    sector.enemies = sector.enemies.filter((candidate) => candidate !== enemy);
+  }
+
+  private updateObjective(dt: number): void {
+    if (this.collectibles.length === 0) {
+      return;
+    }
+
+    for (let index = this.collectibles.length - 1; index >= 0; index -= 1) {
+      const collectible = this.collectibles[index];
+      collectible.pulse += dt;
+      const bob = 1 + Math.sin(collectible.pulse * 3.2) * 0.12;
+      collectible.mesh.scaling.setAll(bob);
+      collectible.mesh.rotation.y += dt * 1.4;
+      collectible.mesh.rotation.x += dt * 0.5;
+
+      if (
+        Vector3.DistanceSquared(this.shipRoot.position, collectible.position) <=
+        COLLECTIBLE_PICKUP_RADIUS * COLLECTIBLE_PICKUP_RADIUS
+      ) {
+        this.collectedSalvage += 1;
+        this.score += collectible.objective ? 120 : 85;
+        this.audio.playPickup();
+        const pickupPosition = collectible.position.clone();
+        this.spawnExplosion(pickupPosition, collectible.objective ? 3.8 : 2.8, new Color3(0.38, 1, 0.72));
+        this.audio.playExplosion(0.72);
+        this.disposeCollectible(index);
+
+        if (collectible.objective) {
+          this.spawnNextObjective(pickupPosition, false);
+          this.setStatus(`Salvage secured. Cargo ${this.collectedSalvage}. Next marker locked.`, 2.4);
+        } else {
+          this.setStatus(`Recovered salvage fragment. Cargo ${this.collectedSalvage}.`, 1.6);
+        }
+      }
     }
   }
 
   private spawnNextObjective(anchor: Vector3, firstObjective: boolean): void {
-    this.disposeObjective();
+    for (let index = this.collectibles.length - 1; index >= 0; index -= 1) {
+      if (this.collectibles[index].objective) {
+        this.disposeCollectible(index);
+      }
+    }
 
     const jitter = randomUnitVector().scale(randomBetween(40, 140));
     this.objectiveDirection = this.objectiveDirection.scale(0.72).add(randomUnitVector().scale(0.28)).normalize();
     const distance = firstObjective ? 420 : randomBetween(OBJECTIVE_MIN_DISTANCE, OBJECTIVE_MAX_DISTANCE);
     const position = anchor.add(this.objectiveDirection.scale(distance)).add(jitter);
 
+    this.spawnCollectible(position, true);
+  }
+
+  private spawnAsteroidSalvage(position: Vector3): void {
+    const scatter = randomUnitVector().scale(randomBetween(1.6, 4.4));
+    this.spawnCollectible(position.add(scatter), false);
+  }
+
+  private spawnCollectible(position: Vector3, objective: boolean): void {
     const mesh = MeshBuilder.CreatePolyhedron(
       `salvage-${performance.now()}`,
-      { type: 1, size: 2.5 },
+      { type: objective ? 1 : 2, size: objective ? 2.5 : 1.8 },
       this.scene,
     );
     mesh.position.copyFrom(position);
 
     const material = new StandardMaterial(`salvage-mat-${performance.now()}`, this.scene);
     material.disableLighting = true;
-    material.emissiveColor = new Color3(0.36, 1, 0.74);
-    material.diffuseColor = new Color3(0.16, 0.56, 0.42);
+    material.emissiveColor = objective ? new Color3(0.36, 1, 0.74) : new Color3(0.62, 1, 0.82);
+    material.diffuseColor = objective ? new Color3(0.16, 0.56, 0.42) : new Color3(0.22, 0.52, 0.42);
     mesh.material = material;
 
-    this.objective = {
+    this.collectibles.push({
       mesh,
       pulse: 0,
-      position,
-    };
+      position: position.clone(),
+      objective,
+    });
   }
 
-  private disposeObjective(): void {
-    if (!this.objective) {
-      return;
-    }
-
-    const material = this.objective.mesh.material;
-    this.objective.mesh.dispose();
+  private disposeCollectible(index: number): void {
+    const collectible = this.collectibles[index];
+    const material = collectible.mesh.material;
+    collectible.mesh.dispose();
     if (material instanceof StandardMaterial) {
       material.dispose();
     }
-    this.objective = null;
+    this.collectibles.splice(index, 1);
+  }
+
+  private clearCollectibles(): void {
+    while (this.collectibles.length > 0) {
+      this.disposeCollectible(this.collectibles.length - 1);
+    }
+  }
+
+  private getTrackedCollectible(): Collectible | null {
+    if (this.collectibles.length === 0) {
+      return null;
+    }
+
+    let nearest: Collectible | null = null;
+    let nearestDistanceSquared = Number.POSITIVE_INFINITY;
+    for (const collectible of this.collectibles) {
+      const distanceSquared = Vector3.DistanceSquared(this.camera.globalPosition, collectible.position);
+      if (distanceSquared < nearestDistanceSquared) {
+        nearestDistanceSquared = distanceSquared;
+        nearest = collectible;
+      }
+    }
+
+    return nearest;
   }
 
   private createCockpit(): void {
@@ -963,13 +1431,14 @@ export class Aster3DGame {
   }
 
   private updateObjectiveHud(): void {
-    if (!this.objective) {
+    const trackedCollectible = this.getTrackedCollectible();
+    if (!trackedCollectible) {
       this.hud.objectiveDistance.textContent = "--";
       this.hud.objectiveEdge.classList.add("hidden");
       return;
     }
 
-    const toObjective = this.objective.position.subtract(this.camera.globalPosition);
+    const toObjective = trackedCollectible.position.subtract(this.camera.globalPosition);
     const distance = toObjective.length();
     this.hud.objectiveDistance.textContent = `${Math.round(distance)}m`;
 

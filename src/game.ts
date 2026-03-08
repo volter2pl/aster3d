@@ -134,8 +134,11 @@ const ASTEROID_SALVAGE_DROP_CHANCE = 0.2;
 const ENEMY_SALVAGE_DROP_CHANCE = 0.4;
 const BASE_POSITION = new Vector3(-180, 24, -340);
 const BASE_DOCK_OFFSET = new Vector3(0, -5, 34);
-const BASE_DOCK_RADIUS = 18;
-const BASE_DOCK_SPEED_LIMIT = 18;
+const BASE_DOCK_OFFSET_APPROACH = new Vector3(0, 8, 68);
+const BASE_SAFE_RADIUS = 92;
+const BASE_ENEMY_AVOID_RADIUS = BASE_SAFE_RADIUS + 18;
+const BASE_COMBAT_EXCLUSION_RADIUS = BASE_SAFE_RADIUS + 70;
+const BASE_NAVIGATION_RADIUS = BASE_SAFE_RADIUS + 120;
 const SALVAGE_SELL_VALUE = 100;
 const SHIELD_REPAIR_COST = 2;
 
@@ -153,6 +156,7 @@ export class Aster3DGame {
   private readonly audio = new AudioManager();
   private readonly keys = new Set<string>();
   private readonly loadedSectors = new Map<string, SectorData>();
+  private readonly baseChevronMaterials: StandardMaterial[] = [];
 
   private readonly asteroids: Asteroid[] = [];
   private readonly enemies: Enemy[] = [];
@@ -171,6 +175,12 @@ export class Aster3DGame {
   private gameOver = false;
   private settingsOpen = false;
   private stationOpen = false;
+  private autoDockActive = false;
+  private autoDockStage = 0;
+  private autoDockProgress = 0;
+  private autoDockDuration = 0;
+  private baseDockRearmRequired = false;
+  private baseShieldFlash = 0;
   private worldSeed = Math.random();
   private collectedSalvage = 0;
   private boostCharge = BOOST_MAX;
@@ -178,7 +188,11 @@ export class Aster3DGame {
   private boostHoldTime = 0;
 
   private readonly shipVelocity = new Vector3(0, 0, 0);
+  private readonly autoDockPathStart = new Vector3();
+  private readonly autoDockPathControl = new Vector3();
+  private readonly autoDockPathEnd = new Vector3();
   private readonly controlSettings: ControlSettings;
+  private baseShieldMaterial: StandardMaterial | null = null;
   private objectiveDirection = new Vector3(0.24, 0.08, 0.97).normalize();
 
   constructor(root: HTMLElement) {
@@ -277,11 +291,6 @@ export class Aster3DGame {
         return;
       }
 
-      if (!event.repeat && event.code === "KeyF" && !this.gameOver && this.canDockAtBase()) {
-        this.openStation();
-        return;
-      }
-
       this.keys.add(event.code);
       if (event.code === "Space" || event.code === "ShiftLeft" || event.code === "ShiftRight") {
         event.preventDefault();
@@ -377,6 +386,7 @@ export class Aster3DGame {
 
   private update(dt: number): void {
     if (this.settingsOpen || this.stationOpen) {
+      this.updateBaseVisuals(dt);
       this.updateHud();
       return;
     }
@@ -386,6 +396,7 @@ export class Aster3DGame {
     }
 
     if (this.gameOver) {
+      this.updateBaseVisuals(dt);
       this.updateHud();
       return;
     }
@@ -393,14 +404,21 @@ export class Aster3DGame {
     this.fireCooldown = Math.max(0, this.fireCooldown - dt);
     this.invulnerability = Math.max(0, this.invulnerability - dt);
     this.statusFlash = Math.max(0, this.statusFlash - dt);
+    this.baseShieldFlash = Math.max(0, this.baseShieldFlash - dt * 2.4);
 
     this.syncWorldSectors();
-    this.updateShip(dt);
+    this.updateBaseState(dt);
+    if (this.autoDockActive) {
+      this.updateAutoDock(dt);
+    } else {
+      this.updateShip(dt);
+    }
     this.updateEnemies(dt);
     this.updateBullets(dt);
     this.updateAsteroids(dt);
     this.updateObjective(dt);
     this.updateExplosions(dt);
+    this.updateBaseVisuals(dt);
 
     this.starfieldRoot.position.copyFrom(this.shipRoot.position);
     this.updateHud();
@@ -465,6 +483,12 @@ export class Aster3DGame {
       bullet.life -= dt;
       bullet.mesh.position.addInPlace(bullet.velocity.scale(dt));
 
+       if (this.isInsideBaseShield(bullet.mesh.position)) {
+        this.triggerBaseShieldFlash(bullet.mesh.position);
+        this.disposeBullet(index);
+        continue;
+      }
+
       if (bullet.life <= 0 || Vector3.DistanceSquared(this.shipRoot.position, bullet.mesh.position) > 140_000) {
         this.disposeBullet(index);
         continue;
@@ -527,6 +551,10 @@ export class Aster3DGame {
   }
 
   private updateEnemies(dt: number): void {
+    const playerNearBase =
+      Vector3.DistanceSquared(this.shipRoot.position, this.baseRoot.position) <=
+      BASE_COMBAT_EXCLUSION_RADIUS * BASE_COMBAT_EXCLUSION_RADIUS;
+
     for (let index = this.enemies.length - 1; index >= 0; index -= 1) {
       const enemy = this.enemies[index];
       enemy.fireCooldown = Math.max(0, enemy.fireCooldown - dt);
@@ -549,9 +577,39 @@ export class Aster3DGame {
       const currentRight = enemy.root.getDirection(Vector3.Right()).normalize();
       const toShipDirection = toShip.scale(1 / distance);
       const forwardDot = Vector3.Dot(currentForward, toShipDirection);
+      const baseBlocksPlayerPath =
+        distancePointToSegmentSquared(this.baseRoot.position, enemy.root.position, this.shipRoot.position) <=
+        BASE_NAVIGATION_RADIUS * BASE_NAVIGATION_RADIUS;
+      const awayFromBase = enemy.root.position.subtract(this.baseRoot.position);
+      const baseDistance = Math.max(0.001, awayFromBase.length());
+      const baseNormal = awayFromBase.scale(1 / baseDistance);
+      const insideAvoidZone = baseDistance < BASE_ENEMY_AVOID_RADIUS;
+      const insideCombatExclusion = baseDistance < BASE_COMBAT_EXCLUSION_RADIUS;
+      const insideNavigationRadius = baseDistance < BASE_NAVIGATION_RADIUS;
+      const shouldAvoidBase =
+        insideNavigationRadius ||
+        (baseBlocksPlayerPath && baseDistance < BASE_NAVIGATION_RADIUS + 36);
 
       let desiredDirection = toShipDirection;
-      if (enemy.recoverTimer > 0) {
+      if (baseDistance < BASE_SAFE_RADIUS + enemy.radius + 1.2) {
+        enemy.state = "recover";
+        enemy.recoverTimer = Math.max(enemy.recoverTimer, 1.25);
+        enemy.fireCooldown = Math.max(enemy.fireCooldown, 0.7);
+        desiredDirection = baseNormal;
+      } else if (shouldAvoidBase) {
+        enemy.state = "recover";
+        enemy.recoverTimer = Math.max(enemy.recoverTimer, 1.05);
+        enemy.fireCooldown = Math.max(enemy.fireCooldown, 0.45);
+
+        let tangent = Vector3.Cross(baseNormal, Vector3.Up());
+        if (tangent.lengthSquared() < 0.001) {
+          tangent = Vector3.Cross(baseNormal, currentRight);
+        }
+        tangent.normalize();
+        const tangentSign = Vector3.Dot(tangent, toShipDirection) >= 0 ? 1 : -1;
+        const outwardBias = insideCombatExclusion ? 0.9 : insideAvoidZone ? 0.6 : 0.38;
+        desiredDirection = tangent.scale(tangentSign).add(baseNormal.scale(outwardBias)).normalize();
+      } else if (enemy.recoverTimer > 0) {
         enemy.state = "recover";
         desiredDirection = toShipDirection.scale(-1).add(currentRight.scale(enemy.strafeSign * 0.72)).normalize();
       } else if (distance < 42 && forwardDot > 0.64) {
@@ -573,16 +631,31 @@ export class Aster3DGame {
       const noseDirection = enemy.root.getDirection(modelForwardAxis).normalize();
       const thrust =
         enemy.state === "recover"
-          ? 24
+          ? (insideCombatExclusion ? 34 : insideNavigationRadius ? 28 : 24)
           : enemy.state === "attack"
             ? 16
             : 20;
       enemy.velocity.addInPlace(noseDirection.scale(thrust * dt));
+      if (insideNavigationRadius) {
+        const radialSpeed = Vector3.Dot(enemy.velocity, baseNormal);
+        if (radialSpeed < 8) {
+          enemy.velocity.addInPlace(baseNormal.scale((8 - radialSpeed) * 0.5));
+        }
+      }
       enemy.velocity.scaleInPlace(Math.exp(-1.05 * dt));
       if (enemy.velocity.lengthSquared() > ENEMY_MAX_SPEED * ENEMY_MAX_SPEED) {
         enemy.velocity.normalize().scaleInPlace(ENEMY_MAX_SPEED);
       }
       enemy.root.position.addInPlace(enemy.velocity.scale(dt));
+
+      const baseDistanceAfterMove = Vector3.Distance(enemy.root.position, this.baseRoot.position);
+      if (baseDistanceAfterMove < BASE_SAFE_RADIUS + enemy.radius) {
+        const bounceNormal = enemy.root.position.subtract(this.baseRoot.position).normalize();
+        enemy.root.position.copyFrom(this.baseRoot.position.add(bounceNormal.scale(BASE_SAFE_RADIUS + enemy.radius + 0.8)));
+        enemy.velocity.copyFrom(reflectVector(enemy.velocity, bounceNormal).scale(0.72));
+        enemy.recoverTimer = Math.max(enemy.recoverTimer, 1.4);
+        this.triggerBaseShieldFlash(enemy.root.position);
+      }
 
       const toShipAfterMove = this.shipRoot.position.subtract(enemy.root.position);
       const distanceAfterMove = Math.max(0.001, toShipAfterMove.length());
@@ -590,7 +663,10 @@ export class Aster3DGame {
 
       if (
         enemy.state === "attack" &&
+        !playerNearBase &&
+        !baseBlocksPlayerPath &&
         distanceAfterMove <= ENEMY_ATTACK_RANGE &&
+        baseDistanceAfterMove > BASE_NAVIGATION_RADIUS - 8 &&
         enemy.fireCooldown === 0
       ) {
         const aimDirection = attackDirection.add(this.shipVelocity.scale(0.012)).normalize();
@@ -888,6 +964,12 @@ export class Aster3DGame {
           y * WORLD_SECTOR_SIZE + rng() * WORLD_SECTOR_SIZE,
           z * WORLD_SECTOR_SIZE + rng() * WORLD_SECTOR_SIZE,
         );
+        if (
+          Vector3.DistanceSquared(enemyPosition, this.baseRoot.position) <
+          BASE_NAVIGATION_RADIUS * BASE_NAVIGATION_RADIUS
+        ) {
+          continue;
+        }
         const enemy = this.spawnEnemy(enemyPosition, key, rng);
         sector.enemies.push(enemy);
       }
@@ -1165,6 +1247,12 @@ export class Aster3DGame {
     this.shield = 100;
     this.boostCharge = BOOST_MAX;
     this.gameOver = false;
+    this.autoDockActive = false;
+    this.autoDockStage = 0;
+    this.autoDockProgress = 0;
+    this.autoDockDuration = 0;
+    this.baseDockRearmRequired = false;
+    this.baseShieldFlash = 0;
     this.collectedSalvage = 0;
     this.worldSeed = Math.random();
     this.objectiveDirection = new Vector3(0.24, 0.08, 0.97).normalize();
@@ -1192,6 +1280,10 @@ export class Aster3DGame {
     this.boostCharge = BOOST_MAX;
     this.boostVisual = 0;
     this.boostHoldTime = 0;
+    this.autoDockActive = false;
+    this.autoDockStage = 0;
+    this.autoDockProgress = 0;
+    this.autoDockDuration = 0;
     this.audio.setEngine(0, 0);
     this.invulnerability = 2.2;
     this.fireCooldown = 0;
@@ -1387,12 +1479,125 @@ export class Aster3DGame {
     return this.baseRoot.position.add(BASE_DOCK_OFFSET);
   }
 
-  private canDockAtBase(): boolean {
-    const dockPosition = this.getBaseDockPosition();
-    return (
-      Vector3.DistanceSquared(this.shipRoot.position, dockPosition) <= BASE_DOCK_RADIUS * BASE_DOCK_RADIUS &&
-      this.shipVelocity.length() <= BASE_DOCK_SPEED_LIMIT
+  private getBaseApproachPosition(): Vector3 {
+    return this.baseRoot.position.add(BASE_DOCK_OFFSET_APPROACH);
+  }
+
+  private isInsideBaseShield(position: Vector3): boolean {
+    return Vector3.DistanceSquared(position, this.baseRoot.position) <= BASE_SAFE_RADIUS * BASE_SAFE_RADIUS;
+  }
+
+  private triggerBaseShieldFlash(position: Vector3): void {
+    this.baseShieldFlash = Math.min(1, this.baseShieldFlash + 0.45);
+    this.spawnExplosion(position, 2.4, new Color3(1, 0.82, 0.44));
+  }
+
+  private updateBaseState(_dt: number): void {
+    const insideShield = this.isInsideBaseShield(this.shipRoot.position);
+
+    if (this.baseDockRearmRequired && !insideShield) {
+      this.baseDockRearmRequired = false;
+    }
+
+    if (!this.baseDockRearmRequired && !this.autoDockActive && insideShield) {
+      this.startAutoDock();
+    }
+  }
+
+  private startAutoDock(): void {
+    this.autoDockActive = true;
+    this.beginAutoDockStage(0);
+    this.keys.clear();
+    if (document.pointerLockElement === this.canvas) {
+      document.exitPointerLock();
+    }
+    this.setStatus("Station field captured. Autodocking...", 999);
+  }
+
+  private beginAutoDockStage(stage: number): void {
+    this.autoDockStage = stage;
+    this.autoDockProgress = 0;
+
+    const stageStart = this.shipRoot.position.clone();
+    const stageEnd = stage === 0 ? this.getBaseApproachPosition() : this.getBaseDockPosition();
+    const midpoint = stageStart.add(stageEnd).scale(0.5);
+    const awayFromBase = stageStart.subtract(this.baseRoot.position);
+    const outward = awayFromBase.lengthSquared() > 0.001 ? awayFromBase.normalize() : Vector3.Forward();
+
+    this.autoDockPathStart.copyFrom(stageStart);
+    this.autoDockPathEnd.copyFrom(stageEnd);
+    this.autoDockPathControl.copyFrom(
+      stage === 0
+        ? midpoint.add(Vector3.Up().scale(12)).add(outward.scale(16))
+        : midpoint.add(Vector3.Up().scale(8)).add(outward.scale(4)),
     );
+
+    const pathLength =
+      Vector3.Distance(this.autoDockPathStart, this.autoDockPathControl) +
+      Vector3.Distance(this.autoDockPathControl, this.autoDockPathEnd);
+    this.autoDockDuration = stage === 0
+      ? Math.max(1.35, pathLength / 34)
+      : Math.max(0.9, pathLength / 22);
+  }
+
+  private updateAutoDock(dt: number): void {
+    this.autoDockProgress = Math.min(this.autoDockDuration, this.autoDockProgress + dt);
+    const t = this.autoDockDuration <= 0 ? 1 : this.autoDockProgress / this.autoDockDuration;
+    const easedT = smoothstep(t);
+    const currentPosition = quadraticBezierPoint(
+      this.autoDockPathStart,
+      this.autoDockPathControl,
+      this.autoDockPathEnd,
+      easedT,
+    );
+    const currentTangent = quadraticBezierTangent(
+      this.autoDockPathStart,
+      this.autoDockPathControl,
+      this.autoDockPathEnd,
+      easedT,
+    );
+    const desiredForward =
+      currentTangent.lengthSquared() > 0.0001
+        ? currentTangent.normalize()
+        : this.autoDockPathEnd.subtract(this.autoDockPathStart).normalize();
+    const targetRotation = this.scene.useRightHandedSystem
+      ? Quaternion.FromLookDirectionRH(desiredForward.scale(-1), Vector3.Up())
+      : Quaternion.FromLookDirectionLH(desiredForward.scale(-1), Vector3.Up());
+    const rotation = this.shipRoot.rotationQuaternion ?? Quaternion.Identity();
+    this.shipRoot.rotationQuaternion = Quaternion.Slerp(rotation, targetRotation, 1 - Math.exp(-4.2 * dt)).normalize();
+
+    const previousPosition = this.shipRoot.position.clone();
+    this.shipRoot.position.copyFrom(currentPosition);
+    this.shipVelocity.copyFrom(currentPosition.subtract(previousPosition).scale(1 / Math.max(dt, 0.0001)));
+
+    if (t >= 1) {
+      this.shipVelocity.setAll(0);
+      if (this.autoDockStage === 0) {
+        this.shipRoot.position.copyFrom(this.getBaseApproachPosition());
+        this.beginAutoDockStage(1);
+      } else {
+        this.shipRoot.position.copyFrom(this.getBaseDockPosition());
+        this.openStation();
+      }
+    }
+  }
+
+  private updateBaseVisuals(_dt: number): void {
+    if (this.baseShieldMaterial) {
+      this.baseShieldMaterial.alpha = 0.08 + this.baseShieldFlash * 0.22;
+      this.baseShieldMaterial.emissiveColor = new Color3(
+        0.46 + this.baseShieldFlash * 0.28,
+        0.62 + this.baseShieldFlash * 0.18,
+        0.92 + this.baseShieldFlash * 0.06,
+      );
+    }
+
+    for (let index = 0; index < this.baseChevronMaterials.length; index += 1) {
+      const phase = performance.now() * 0.005 + index * 0.75;
+      const glow = 0.38 + (Math.sin(phase) * 0.5 + 0.5) * 0.62;
+      this.baseChevronMaterials[index].emissiveColor = new Color3(0.78 * glow, 0.54 * glow, 0.14 * glow);
+      this.baseChevronMaterials[index].alpha = 0.54 + glow * 0.26;
+    }
   }
 
   private createBase(): void {
@@ -1412,6 +1617,15 @@ export class Aster3DGame {
     beaconMaterial.disableLighting = true;
     beaconMaterial.emissiveColor = new Color3(1, 0.95, 0.86);
     beaconMaterial.diffuseColor = new Color3(0.84, 0.76, 0.62);
+
+    const shieldMaterial = new StandardMaterial("base-shield-mat", this.scene);
+    shieldMaterial.disableLighting = true;
+    shieldMaterial.emissiveColor = new Color3(0.46, 0.62, 0.92);
+    shieldMaterial.diffuseColor = new Color3(0.14, 0.2, 0.38);
+    shieldMaterial.specularColor = Color3.Black();
+    shieldMaterial.alpha = 0.13;
+    shieldMaterial.backFaceCulling = false;
+    this.baseShieldMaterial = shieldMaterial;
 
     const core = MeshBuilder.CreateCylinder(
       "base-core",
@@ -1473,9 +1687,37 @@ export class Aster3DGame {
     beacon.parent = this.baseRoot;
     beacon.position.set(0, 0, 27.5);
     beacon.material = beaconMaterial;
+
+    const shield = MeshBuilder.CreateSphere("base-shield", { diameter: BASE_SAFE_RADIUS * 2, segments: 20 }, this.scene);
+    shield.parent = this.baseRoot;
+    shield.material = shieldMaterial;
+
+    for (let index = 0; index < 4; index += 1) {
+      const chevronMaterial = new StandardMaterial(`base-chevron-${index}`, this.scene);
+      chevronMaterial.disableLighting = true;
+      chevronMaterial.emissiveColor = new Color3(0.78, 0.54, 0.14);
+      chevronMaterial.diffuseColor = new Color3(0.82, 0.58, 0.18);
+      chevronMaterial.alpha = 0.75;
+      this.baseChevronMaterials.push(chevronMaterial);
+
+      const chevron = MeshBuilder.CreateCylinder(
+        `base-chevron-mesh-${index}`,
+        { height: 0.18, diameterTop: 0, diameterBottom: 4.8, tessellation: 3 },
+        this.scene,
+      );
+      chevron.parent = this.baseRoot;
+      chevron.position.set(0, -2.18, 14 + index * 7.2);
+      chevron.rotation.x = Math.PI * 0.5;
+      chevron.rotation.z = Math.PI;
+      chevron.material = chevronMaterial;
+    }
   }
 
   private openStation(): void {
+    this.autoDockActive = false;
+    this.autoDockStage = 0;
+    this.autoDockProgress = 0;
+    this.autoDockDuration = 0;
     this.stationOpen = true;
     this.keys.clear();
     this.shipVelocity.scaleInPlace(0);
@@ -1490,8 +1732,14 @@ export class Aster3DGame {
 
   private closeStation(): void {
     this.stationOpen = false;
+    this.autoDockActive = false;
+    this.autoDockStage = 0;
+    this.autoDockProgress = 0;
+    this.autoDockDuration = 0;
+    this.baseDockRearmRequired = true;
+    this.shipVelocity.scaleInPlace(0);
     this.stationUi.overlay.classList.add("hidden");
-    this.setStatus("Undocked. Click to re-engage cockpit controls.", 1.8);
+    this.setStatus("Docking clamps released. Throttle up to depart.", 1.8);
   }
 
   private updateStationUi(message?: string): void {
@@ -1739,16 +1987,20 @@ export class Aster3DGame {
   }
 
   private getDockingPrompt(): string | null {
-    const dockDistance = Vector3.Distance(this.shipRoot.position, this.getBaseDockPosition());
-    if (dockDistance > BASE_DOCK_RADIUS * 1.8) {
+    if (this.autoDockActive) {
+      return "Autodocking to Frontier Station";
+    }
+
+    const baseDistance = Vector3.Distance(this.shipRoot.position, this.baseRoot.position);
+    if (baseDistance > BASE_SAFE_RADIUS * 1.16) {
       return null;
     }
 
-    if (this.shipVelocity.length() > BASE_DOCK_SPEED_LIMIT) {
-      return `Reduce speed below ${BASE_DOCK_SPEED_LIMIT} to dock`;
+    if (this.baseDockRearmRequired) {
+      return "Safe zone secured. Throttle out to leave the station";
     }
 
-    return "Press F to dock at Frontier Station";
+    return "Station field will capture your ship automatically";
   }
 
   private setStatus(text: string, duration: number): void {
@@ -1832,6 +2084,43 @@ function randomUnitVector(): Vector3 {
 
 function sectorKey(x: number, y: number, z: number): string {
   return `${x}:${y}:${z}`;
+}
+
+function reflectVector(vector: Vector3, normal: Vector3): Vector3 {
+  return vector.subtract(normal.scale(2 * Vector3.Dot(vector, normal)));
+}
+
+function distancePointToSegmentSquared(point: Vector3, segmentStart: Vector3, segmentEnd: Vector3): number {
+  const segment = segmentEnd.subtract(segmentStart);
+  const lengthSquared = segment.lengthSquared();
+  if (lengthSquared < 0.000001) {
+    return Vector3.DistanceSquared(point, segmentStart);
+  }
+
+  const projection = Vector3.Dot(point.subtract(segmentStart), segment) / lengthSquared;
+  const clamped = Math.min(1, Math.max(0, projection));
+  const closestPoint = segmentStart.add(segment.scale(clamped));
+  return Vector3.DistanceSquared(point, closestPoint);
+}
+
+function quadraticBezierPoint(start: Vector3, control: Vector3, end: Vector3, t: number): Vector3 {
+  const oneMinusT = 1 - t;
+  return start
+    .scale(oneMinusT * oneMinusT)
+    .add(control.scale(2 * oneMinusT * t))
+    .add(end.scale(t * t));
+}
+
+function quadraticBezierTangent(start: Vector3, control: Vector3, end: Vector3, t: number): Vector3 {
+  return control
+    .subtract(start)
+    .scale(2 * (1 - t))
+    .add(end.subtract(control).scale(2 * t));
+}
+
+function smoothstep(value: number): number {
+  const clamped = Math.min(1, Math.max(0, value));
+  return clamped * clamped * (3 - 2 * clamped);
 }
 
 function hashSector(seed: number, x: number, y: number, z: number): number {

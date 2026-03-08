@@ -305,6 +305,10 @@ export class Aster3DGame {
         return;
       }
 
+      if (!this.hasActivePointerLock() && !this.gameOver) {
+        return;
+      }
+
       this.keys.add(event.code);
       if (event.code === "Space" || event.code === "ShiftLeft" || event.code === "ShiftRight") {
         event.preventDefault();
@@ -336,11 +340,18 @@ export class Aster3DGame {
     });
 
     document.addEventListener("pointerlockchange", () => {
-      if (!this.gameOver && !this.settingsOpen && !this.stationOpen) {
+      if (!this.hasActivePointerLock()) {
+        this.keys.clear();
+        this.mouseLookX = 0;
+        this.mouseLookY = 0;
+        this.audio.setEngine(0, 0);
+      }
+
+      if (!this.gameOver && !this.settingsOpen && !this.stationOpen && !this.autoDockActive) {
         this.setStatus(
-          document.pointerLockElement === this.canvas
+          this.hasActivePointerLock()
             ? "Mouse active. Mouse or arrows yaw/pitch, A/D yaw, Q/E roll, Shift boost, Space fire."
-            : "Click to engage cockpit controls",
+            : "Paused. Click to resume cockpit controls",
           1.25,
         );
       }
@@ -441,6 +452,13 @@ export class Aster3DGame {
     }
 
     if (this.gameOver) {
+      this.updateBaseVisuals(dt);
+      this.updateHud();
+      return;
+    }
+
+    if (this.shouldPauseForPointerUnlock()) {
+      this.audio.setEngine(0, 0);
       this.updateBaseVisuals(dt);
       this.updateHud();
       return;
@@ -1957,9 +1975,9 @@ export class Aster3DGame {
       const dockingPrompt = this.getDockingPrompt();
       this.hud.status.textContent =
         dockingPrompt ??
-        (document.pointerLockElement === this.canvas
+        (this.hasActivePointerLock()
           ? "Mouse yaw/pitch  A/D yaw  Q/E roll  Shift boost  Space fire"
-          : "Click to engage cockpit controls");
+          : "Paused. Click to resume cockpit controls");
     }
   }
 
@@ -2059,6 +2077,14 @@ export class Aster3DGame {
   private setStatus(text: string, duration: number): void {
     this.hud.status.textContent = text;
     this.statusFlash = duration;
+  }
+
+  private hasActivePointerLock(): boolean {
+    return document.pointerLockElement === this.canvas;
+  }
+
+  private shouldPauseForPointerUnlock(): boolean {
+    return !this.hasActivePointerLock() && !this.autoDockActive;
   }
 
   private openSettings(): void {

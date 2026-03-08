@@ -21,6 +21,21 @@ Build produkcyjny:
 npm run build
 ```
 
+## GitHub Pages
+
+Repo ma workflow GitHub Actions w `/.github/workflows/deploy-pages.yml`.
+
+Aby publikacja zadzialala:
+
+```text
+GitHub -> Settings -> Pages -> Build and deployment -> Source -> GitHub Actions
+```
+
+Kazdy push na `main`:
+- instaluje zaleznosci
+- buduje projekt
+- publikuje zawartosc `dist` na GitHub Pages
+
 ## Sterowanie
 
 - `Klik` - aktywacja pointer lock

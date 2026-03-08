@@ -42,12 +42,16 @@ type HudRefs = {
   score: HTMLElement;
   lives: HTMLElement;
   shield: HTMLElement;
+  cargo: HTMLElement;
   boost: HTMLElement;
   speed: HTMLElement;
   objectiveDistance: HTMLElement;
+  baseDistance: HTMLElement;
   boostVeil: HTMLElement;
   objectiveEdge: HTMLElement;
   objectiveEdgeArrow: HTMLElement;
+  baseEdge: HTMLElement;
+  baseEdgeArrow: HTMLElement;
   status: HTMLElement;
   overlay: HTMLElement;
   finalScore: HTMLElement;
@@ -59,6 +63,17 @@ type SettingsRefs = {
   closeButton: HTMLButtonElement;
   invertHorizontal: HTMLInputElement;
   invertVertical: HTMLInputElement;
+};
+
+type StationRefs = {
+  overlay: HTMLElement;
+  cargo: HTMLElement;
+  points: HTMLElement;
+  shield: HTMLElement;
+  message: HTMLElement;
+  sellButton: HTMLButtonElement;
+  repairButton: HTMLButtonElement;
+  undockButton: HTMLButtonElement;
 };
 
 type ControlSettings = {
@@ -117,16 +132,24 @@ const ENEMY_COLLISION_RADIUS = 2.8;
 const ENEMY_VIEW_DISTANCE = WORLD_SECTOR_SIZE * (WORLD_UNLOAD_RADIUS + 1.2);
 const ASTEROID_SALVAGE_DROP_CHANCE = 0.2;
 const ENEMY_SALVAGE_DROP_CHANCE = 0.4;
+const BASE_POSITION = new Vector3(-180, 24, -340);
+const BASE_DOCK_OFFSET = new Vector3(0, -5, 34);
+const BASE_DOCK_RADIUS = 18;
+const BASE_DOCK_SPEED_LIMIT = 18;
+const SALVAGE_SELL_VALUE = 100;
+const SHIELD_REPAIR_COST = 2;
 
 export class Aster3DGame {
   private readonly canvas: HTMLCanvasElement;
   private readonly hud: HudRefs;
   private readonly settingsUi: SettingsRefs;
+  private readonly stationUi: StationRefs;
   private readonly engine: Engine;
   private readonly scene: Scene;
   private readonly camera: UniversalCamera;
   private readonly shipRoot: TransformNode;
   private readonly starfieldRoot: TransformNode;
+  private readonly baseRoot: TransformNode;
   private readonly audio = new AudioManager();
   private readonly keys = new Set<string>();
   private readonly loadedSectors = new Map<string, SectorData>();
@@ -147,6 +170,7 @@ export class Aster3DGame {
   private statusFlash = 0;
   private gameOver = false;
   private settingsOpen = false;
+  private stationOpen = false;
   private worldSeed = Math.random();
   private collectedSalvage = 0;
   private boostCharge = BOOST_MAX;
@@ -163,12 +187,16 @@ export class Aster3DGame {
       score: this.requireElement(root, "[data-score]"),
       lives: this.requireElement(root, "[data-lives]"),
       shield: this.requireElement(root, "[data-shield]"),
+      cargo: this.requireElement(root, "[data-cargo]"),
       boost: this.requireElement(root, "[data-boost]"),
       speed: this.requireElement(root, "[data-speed]"),
       objectiveDistance: this.requireElement(root, "[data-objective-distance]"),
+      baseDistance: this.requireElement(root, "[data-base-distance]"),
       boostVeil: this.requireElement(root, "[data-boost-veil]"),
       objectiveEdge: this.requireElement(root, "[data-objective-edge]"),
       objectiveEdgeArrow: this.requireElement(root, ".objective-edge__arrow"),
+      baseEdge: this.requireElement(root, "[data-base-edge]"),
+      baseEdgeArrow: this.requireElement(root, "[data-base-edge-arrow]"),
       status: this.requireElement(root, "[data-status]"),
       overlay: this.requireElement(root, "[data-game-over]"),
       finalScore: this.requireElement(root, "[data-final-score]"),
@@ -179,6 +207,16 @@ export class Aster3DGame {
       closeButton: this.requireElement(root, "[data-close-settings]"),
       invertHorizontal: this.requireElement(root, "[data-invert-horizontal]"),
       invertVertical: this.requireElement(root, "[data-invert-vertical]"),
+    };
+    this.stationUi = {
+      overlay: this.requireElement(root, "[data-station]"),
+      cargo: this.requireElement(root, "[data-station-cargo]"),
+      points: this.requireElement(root, "[data-station-points]"),
+      shield: this.requireElement(root, "[data-station-shield]"),
+      message: this.requireElement(root, "[data-station-message]"),
+      sellButton: this.requireElement(root, "[data-sell-salvage]"),
+      repairButton: this.requireElement(root, "[data-repair-shields]"),
+      undockButton: this.requireElement(root, "[data-undock]"),
     };
     this.controlSettings = this.loadControlSettings();
 
@@ -203,9 +241,11 @@ export class Aster3DGame {
     this.scene.activeCamera = this.camera;
 
     this.starfieldRoot = new TransformNode("starfieldRoot", this.scene);
+    this.baseRoot = new TransformNode("baseRoot", this.scene);
 
     this.createCockpit();
     this.createStarfield();
+    this.createBase();
     this.syncSettingsUi();
     this.bindEvents();
     this.resetRun();
@@ -223,12 +263,22 @@ export class Aster3DGame {
     });
 
     window.addEventListener("keydown", (event) => {
+      if (this.stationOpen && event.code === "Escape") {
+        this.closeStation();
+        return;
+      }
+
       if (this.settingsOpen && event.code === "Escape") {
         this.closeSettings();
         return;
       }
 
-      if (this.settingsOpen && event.code !== "Escape") {
+      if (this.settingsOpen || this.stationOpen) {
+        return;
+      }
+
+      if (!event.repeat && event.code === "KeyF" && !this.gameOver && this.canDockAtBase()) {
+        this.openStation();
         return;
       }
 
@@ -263,7 +313,7 @@ export class Aster3DGame {
     });
 
     document.addEventListener("pointerlockchange", () => {
-      if (!this.gameOver && !this.settingsOpen) {
+      if (!this.gameOver && !this.settingsOpen && !this.stationOpen) {
         this.setStatus(
           document.pointerLockElement === this.canvas
             ? "Mouse active. Mouse yaw/pitch, A/D yaw, Q/E roll, Shift boost, Space fire."
@@ -288,6 +338,24 @@ export class Aster3DGame {
       }
     });
 
+    this.stationUi.overlay.addEventListener("click", (event) => {
+      if (event.target === this.stationUi.overlay) {
+        this.closeStation();
+      }
+    });
+
+    this.stationUi.sellButton.addEventListener("click", () => {
+      this.sellSalvage();
+    });
+
+    this.stationUi.repairButton.addEventListener("click", () => {
+      this.repairShields();
+    });
+
+    this.stationUi.undockButton.addEventListener("click", () => {
+      this.closeStation();
+    });
+
     this.settingsUi.invertHorizontal.addEventListener("change", () => {
       this.controlSettings.invertHorizontal = this.settingsUi.invertHorizontal.checked;
       this.persistControlSettings();
@@ -308,7 +376,7 @@ export class Aster3DGame {
   }
 
   private update(dt: number): void {
-    if (this.settingsOpen) {
+    if (this.settingsOpen || this.stationOpen) {
       this.updateHud();
       return;
     }
@@ -731,7 +799,7 @@ export class Aster3DGame {
       this.lives = 0;
       this.gameOver = true;
       this.hud.overlay.classList.remove("hidden");
-      this.hud.finalScore.textContent = `Final score: ${this.score}`;
+      this.hud.finalScore.textContent = `Final points: ${this.score}`;
       this.setStatus("Hull integrity lost. Press R to relaunch.", 999);
       return;
     }
@@ -1100,7 +1168,9 @@ export class Aster3DGame {
     this.collectedSalvage = 0;
     this.worldSeed = Math.random();
     this.objectiveDirection = new Vector3(0.24, 0.08, 0.97).normalize();
+    this.stationOpen = false;
     this.hud.overlay.classList.add("hidden");
+    this.stationUi.overlay.classList.add("hidden");
     this.setStatus("Click to engage cockpit controls", 1.8);
     this.clearWorld();
     this.resetShipState(false);
@@ -1108,6 +1178,7 @@ export class Aster3DGame {
     this.syncWorldSectors();
     this.clearBullets();
     this.clearExplosions();
+    this.updateStationUi("Sell salvage for points or repair shields.");
     this.updateHud();
   }
 
@@ -1312,6 +1383,157 @@ export class Aster3DGame {
     return nearest;
   }
 
+  private getBaseDockPosition(): Vector3 {
+    return this.baseRoot.position.add(BASE_DOCK_OFFSET);
+  }
+
+  private canDockAtBase(): boolean {
+    const dockPosition = this.getBaseDockPosition();
+    return (
+      Vector3.DistanceSquared(this.shipRoot.position, dockPosition) <= BASE_DOCK_RADIUS * BASE_DOCK_RADIUS &&
+      this.shipVelocity.length() <= BASE_DOCK_SPEED_LIMIT
+    );
+  }
+
+  private createBase(): void {
+    this.baseRoot.position.copyFrom(BASE_POSITION);
+
+    const hullMaterial = new StandardMaterial("base-hull-mat", this.scene);
+    hullMaterial.diffuseColor = new Color3(0.36, 0.37, 0.43);
+    hullMaterial.emissiveColor = new Color3(0.05, 0.05, 0.08);
+    hullMaterial.specularColor = new Color3(0.1, 0.1, 0.1);
+
+    const accentMaterial = new StandardMaterial("base-accent-mat", this.scene);
+    accentMaterial.disableLighting = true;
+    accentMaterial.emissiveColor = new Color3(1, 0.78, 0.34);
+    accentMaterial.diffuseColor = new Color3(0.82, 0.58, 0.22);
+
+    const beaconMaterial = new StandardMaterial("base-beacon-mat", this.scene);
+    beaconMaterial.disableLighting = true;
+    beaconMaterial.emissiveColor = new Color3(1, 0.95, 0.86);
+    beaconMaterial.diffuseColor = new Color3(0.84, 0.76, 0.62);
+
+    const core = MeshBuilder.CreateCylinder(
+      "base-core",
+      { height: 12, diameter: 8.6, tessellation: 10 },
+      this.scene,
+    );
+    core.parent = this.baseRoot;
+    core.rotation.x = Math.PI * 0.5;
+    core.material = hullMaterial;
+
+    const spine = MeshBuilder.CreateBox(
+      "base-spine",
+      { width: 3.4, height: 3.4, depth: 26 },
+      this.scene,
+    );
+    spine.parent = this.baseRoot;
+    spine.material = hullMaterial;
+
+    const hangar = MeshBuilder.CreateBox(
+      "base-hangar",
+      { width: 10, height: 5.4, depth: 6 },
+      this.scene,
+    );
+    hangar.parent = this.baseRoot;
+    hangar.position.z = 16;
+    hangar.material = hullMaterial;
+
+    const dock = MeshBuilder.CreateCylinder(
+      "base-dock",
+      { height: 5.6, diameter: 12.5, tessellation: 12 },
+      this.scene,
+    );
+    dock.parent = this.baseRoot;
+    dock.rotation.x = Math.PI * 0.5;
+    dock.position.z = 21.5;
+    dock.material = accentMaterial;
+
+    const dishLeft = MeshBuilder.CreateBox(
+      "base-wing-l",
+      { width: 16, height: 1, depth: 4 },
+      this.scene,
+    );
+    dishLeft.parent = this.baseRoot;
+    dishLeft.position.set(-11.5, 0, -3.5);
+    dishLeft.rotation.z = 0.1;
+    dishLeft.material = hullMaterial;
+
+    const dishRight = MeshBuilder.CreateBox(
+      "base-wing-r",
+      { width: 16, height: 1, depth: 4 },
+      this.scene,
+    );
+    dishRight.parent = this.baseRoot;
+    dishRight.position.set(11.5, 0, -3.5);
+    dishRight.rotation.z = -0.1;
+    dishRight.material = hullMaterial;
+
+    const beacon = MeshBuilder.CreateSphere("base-beacon", { diameter: 2.4, segments: 8 }, this.scene);
+    beacon.parent = this.baseRoot;
+    beacon.position.set(0, 0, 27.5);
+    beacon.material = beaconMaterial;
+  }
+
+  private openStation(): void {
+    this.stationOpen = true;
+    this.keys.clear();
+    this.shipVelocity.scaleInPlace(0);
+    this.shipRoot.position.copyFrom(this.getBaseDockPosition());
+    this.stationUi.overlay.classList.remove("hidden");
+    if (document.pointerLockElement === this.canvas) {
+      document.exitPointerLock();
+    }
+    this.updateStationUi("Docking clamps engaged.");
+    this.setStatus("Docked at Frontier Station", 999);
+  }
+
+  private closeStation(): void {
+    this.stationOpen = false;
+    this.stationUi.overlay.classList.add("hidden");
+    this.setStatus("Undocked. Click to re-engage cockpit controls.", 1.8);
+  }
+
+  private updateStationUi(message?: string): void {
+    this.stationUi.cargo.textContent = this.collectedSalvage.toString();
+    this.stationUi.points.textContent = this.score.toString();
+    this.stationUi.shield.textContent = `${Math.round(this.shield)}%`;
+    if (message) {
+      this.stationUi.message.textContent = message;
+    }
+  }
+
+  private sellSalvage(): void {
+    if (this.collectedSalvage === 0) {
+      this.updateStationUi("Cargo hold is empty.");
+      return;
+    }
+
+    const sold = this.collectedSalvage;
+    const payout = sold * SALVAGE_SELL_VALUE;
+    this.collectedSalvage = 0;
+    this.score += payout;
+    this.updateStationUi(`Sold ${sold} salvage for ${payout} points.`);
+  }
+
+  private repairShields(): void {
+    const missingShield = Math.max(0, 100 - this.shield);
+    if (missingShield <= 0) {
+      this.updateStationUi("Shields already at full strength.");
+      return;
+    }
+
+    const affordableRepair = Math.min(missingShield, Math.floor(this.score / SHIELD_REPAIR_COST));
+    if (affordableRepair <= 0) {
+      this.updateStationUi("Insufficient points for shield repair.");
+      return;
+    }
+
+    this.shield += affordableRepair;
+    this.score -= affordableRepair * SHIELD_REPAIR_COST;
+    this.updateStationUi(`Repaired shields by ${affordableRepair}% for ${affordableRepair * SHIELD_REPAIR_COST} points.`);
+  }
+
   private createCockpit(): void {
     const cockpitMaterial = new StandardMaterial("cockpit-mat", this.scene);
     cockpitMaterial.diffuseColor = new Color3(0.08, 0.12, 0.2);
@@ -1416,6 +1638,7 @@ export class Aster3DGame {
     this.hud.score.textContent = this.score.toString();
     this.hud.lives.textContent = this.lives.toString();
     this.hud.shield.textContent = `${Math.round(this.shield)}%`;
+    this.hud.cargo.textContent = this.collectedSalvage.toString();
     this.hud.boost.textContent = `${Math.round(this.boostCharge)}%`;
     this.hud.speed.textContent = Math.round(this.shipVelocity.length()).toString();
     this.hud.boostVeil.style.opacity = `${this.boostVisual}`;
@@ -1424,9 +1647,18 @@ export class Aster3DGame {
     this.hud.boostVeil.style.backdropFilter = `blur(${blur}px) saturate(${saturate})`;
     this.hud.boostVeil.style.setProperty("-webkit-backdrop-filter", `blur(${blur}px) saturate(${saturate})`);
     this.updateObjectiveHud();
+    this.updateBaseHud();
+    if (this.stationOpen) {
+      this.updateStationUi();
+    }
 
-    if (this.statusFlash === 0 && !this.gameOver && document.pointerLockElement === this.canvas) {
-      this.hud.status.textContent = "Mouse yaw/pitch  A/D yaw  Q/E roll  Shift boost  Space fire";
+    if (this.statusFlash === 0 && !this.gameOver && !this.stationOpen) {
+      const dockingPrompt = this.getDockingPrompt();
+      this.hud.status.textContent =
+        dockingPrompt ??
+        (document.pointerLockElement === this.canvas
+          ? "Mouse yaw/pitch  A/D yaw  Q/E roll  Shift boost  Space fire"
+          : "Click to engage cockpit controls");
     }
   }
 
@@ -1438,37 +1670,43 @@ export class Aster3DGame {
       return;
     }
 
-    const toObjective = trackedCollectible.position.subtract(this.camera.globalPosition);
-    const distance = toObjective.length();
-    this.hud.objectiveDistance.textContent = `${Math.round(distance)}m`;
+    const distance = this.updateEdgeMarker(trackedCollectible.position, this.hud.objectiveEdge, this.hud.objectiveEdgeArrow);
+    this.hud.objectiveDistance.textContent = distance === null ? "--" : `${Math.round(distance)}m`;
+  }
+
+  private updateBaseHud(): void {
+    const baseTarget = this.getBaseDockPosition();
+    const distance = this.updateEdgeMarker(baseTarget, this.hud.baseEdge, this.hud.baseEdgeArrow);
+    this.hud.baseDistance.textContent = distance === null ? "--" : `${Math.round(distance)}m`;
+  }
+
+  private updateEdgeMarker(targetPosition: Vector3, edge: HTMLElement, arrow: HTMLElement): number | null {
+    const toTarget = targetPosition.subtract(this.camera.globalPosition);
+    const distance = toTarget.length();
 
     const width = this.canvas.clientWidth;
     const height = this.canvas.clientHeight;
     if (width === 0 || height === 0 || distance < 0.001) {
-      this.hud.objectiveEdge.classList.add("hidden");
-      return;
+      edge.classList.add("hidden");
+      return null;
     }
 
     const forward = this.camera.getDirection(Vector3.Forward(this.scene.useRightHandedSystem)).normalize();
     const right = this.camera.getDirection(Vector3.Right()).normalize();
     const up = this.camera.getDirection(Vector3.Up()).normalize();
 
-    const localX = Vector3.Dot(toObjective, right);
-    const localY = Vector3.Dot(toObjective, up);
-    const localZ = Vector3.Dot(toObjective, forward);
+    const localX = Vector3.Dot(toTarget, right);
+    const localY = Vector3.Dot(toTarget, up);
+    const localZ = Vector3.Dot(toTarget, forward);
     const aspect = width / height;
     const tanHalfFov = Math.tan(this.camera.fov * 0.5);
     const projectedX = localX / Math.max(Math.abs(localZ), 0.001) / (tanHalfFov * aspect);
     const projectedY = localY / Math.max(Math.abs(localZ), 0.001) / tanHalfFov;
 
-    const onScreen =
-      localZ > 0 &&
-      Math.abs(projectedX) <= 1 &&
-      Math.abs(projectedY) <= 1;
-
+    const onScreen = localZ > 0 && Math.abs(projectedX) <= 1 && Math.abs(projectedY) <= 1;
     if (onScreen) {
-      this.hud.objectiveEdge.classList.add("hidden");
-      return;
+      edge.classList.add("hidden");
+      return distance;
     }
 
     let screenDirX = localX;
@@ -1493,10 +1731,24 @@ export class Aster3DGame {
     const edgeY = centerY + screenDirY * scale;
     const angle = Math.atan2(screenDirY, screenDirX) * (180 / Math.PI) + 90;
 
-    this.hud.objectiveEdge.style.left = `${edgeX}px`;
-    this.hud.objectiveEdge.style.top = `${edgeY}px`;
-    this.hud.objectiveEdgeArrow.style.transform = `rotate(${angle}deg)`;
-    this.hud.objectiveEdge.classList.remove("hidden");
+    edge.style.left = `${edgeX}px`;
+    edge.style.top = `${edgeY}px`;
+    arrow.style.transform = `rotate(${angle}deg)`;
+    edge.classList.remove("hidden");
+    return distance;
+  }
+
+  private getDockingPrompt(): string | null {
+    const dockDistance = Vector3.Distance(this.shipRoot.position, this.getBaseDockPosition());
+    if (dockDistance > BASE_DOCK_RADIUS * 1.8) {
+      return null;
+    }
+
+    if (this.shipVelocity.length() > BASE_DOCK_SPEED_LIMIT) {
+      return `Reduce speed below ${BASE_DOCK_SPEED_LIMIT} to dock`;
+    }
+
+    return "Press F to dock at Frontier Station";
   }
 
   private setStatus(text: string, duration: number): void {

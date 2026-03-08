@@ -13,7 +13,7 @@ app.innerHTML = `
     <div class="hud" aria-hidden="true">
       <div class="hud__top">
         <div class="panel">
-          <span class="panel__label">Score</span>
+          <span class="panel__label">Points</span>
           <span class="panel__value" data-score>0</span>
         </div>
         <div class="panel">
@@ -23,6 +23,10 @@ app.innerHTML = `
         <div class="panel">
           <span class="panel__label">Shield</span>
           <span class="panel__value" data-shield>100%</span>
+        </div>
+        <div class="panel">
+          <span class="panel__label">Cargo</span>
+          <span class="panel__value" data-cargo>0</span>
         </div>
         <div class="panel">
           <span class="panel__label">Boost</span>
@@ -42,6 +46,10 @@ app.innerHTML = `
             <span data-objective-distance>--</span>
           </span>
         </div>
+        <div class="panel panel--base">
+          <span class="panel__label">Base</span>
+          <span class="panel__value" data-base-distance>--</span>
+        </div>
       </div>
       <div class="reticle">
         <span></span>
@@ -51,6 +59,10 @@ app.innerHTML = `
       <div class="objective-edge hidden" data-objective-edge>
         <span class="objective-edge__arrow">▲</span>
         <span class="objective-edge__label">SALVAGE</span>
+      </div>
+      <div class="objective-edge objective-edge--base hidden" data-base-edge>
+        <span class="objective-edge__arrow" data-base-edge-arrow>▲</span>
+        <span class="objective-edge__label">BASE</span>
       </div>
       <div class="hud__bottom">
         <div class="status" data-status>Click to engage cockpit controls</div>
@@ -76,6 +88,32 @@ app.innerHTML = `
             <span>Invert vertical axis</span>
           </label>
           <button class="overlay__action" type="button" data-close-settings>Close</button>
+        </div>
+      </div>
+      <div class="overlay hidden" data-station>
+        <div class="overlay__card overlay__card--station">
+          <p class="overlay__eyebrow overlay__eyebrow--safe">Docked</p>
+          <h2>Frontier Station</h2>
+          <div class="station-grid">
+            <div class="station-stat">
+              <span>Cargo</span>
+              <strong data-station-cargo>0</strong>
+            </div>
+            <div class="station-stat">
+              <span>Points</span>
+              <strong data-station-points>0</strong>
+            </div>
+            <div class="station-stat">
+              <span>Shield</span>
+              <strong data-station-shield>100%</strong>
+            </div>
+          </div>
+          <p class="station-note" data-station-message>Sell salvage for points or repair shields.</p>
+          <div class="station-actions">
+            <button class="overlay__action" type="button" data-sell-salvage>Sell salvage</button>
+            <button class="overlay__action" type="button" data-repair-shields>Repair shields</button>
+            <button class="overlay__action overlay__action--ghost" type="button" data-undock>Undock</button>
+          </div>
         </div>
       </div>
     </div>

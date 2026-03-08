@@ -61,8 +61,12 @@ type SettingsRefs = {
   overlay: HTMLElement;
   openButton: HTMLButtonElement;
   closeButton: HTMLButtonElement;
-  invertHorizontal: HTMLInputElement;
-  invertVertical: HTMLInputElement;
+  mouseInvertHorizontal: HTMLInputElement;
+  mouseInvertVertical: HTMLInputElement;
+  keyboardInvertHorizontal: HTMLInputElement;
+  keyboardInvertVertical: HTMLInputElement;
+  arrowLookSpeed: HTMLInputElement;
+  arrowLookSpeedValue: HTMLElement;
 };
 
 type StationRefs = {
@@ -77,8 +81,11 @@ type StationRefs = {
 };
 
 type ControlSettings = {
-  invertHorizontal: boolean;
-  invertVertical: boolean;
+  mouseInvertHorizontal: boolean;
+  mouseInvertVertical: boolean;
+  keyboardInvertHorizontal: boolean;
+  keyboardInvertVertical: boolean;
+  arrowLookSpeed: number;
 };
 
 type SectorData = {
@@ -141,6 +148,9 @@ const BASE_COMBAT_EXCLUSION_RADIUS = BASE_SAFE_RADIUS + 70;
 const BASE_NAVIGATION_RADIUS = BASE_SAFE_RADIUS + 120;
 const SALVAGE_SELL_VALUE = 100;
 const SHIELD_REPAIR_COST = 2;
+const ARROW_LOOK_SPEED_MIN = 0.6;
+const ARROW_LOOK_SPEED_MAX = 3.4;
+const ARROW_LOOK_SPEED_DEFAULT = 20;
 
 export class Aster3DGame {
   private readonly canvas: HTMLCanvasElement;
@@ -219,8 +229,12 @@ export class Aster3DGame {
       overlay: this.requireElement(root, "[data-settings]"),
       openButton: this.requireElement(root, "[data-open-settings]"),
       closeButton: this.requireElement(root, "[data-close-settings]"),
-      invertHorizontal: this.requireElement(root, "[data-invert-horizontal]"),
-      invertVertical: this.requireElement(root, "[data-invert-vertical]"),
+      mouseInvertHorizontal: this.requireElement(root, "[data-mouse-invert-horizontal]"),
+      mouseInvertVertical: this.requireElement(root, "[data-mouse-invert-vertical]"),
+      keyboardInvertHorizontal: this.requireElement(root, "[data-keyboard-invert-horizontal]"),
+      keyboardInvertVertical: this.requireElement(root, "[data-keyboard-invert-vertical]"),
+      arrowLookSpeed: this.requireElement(root, "[data-arrow-look-speed]"),
+      arrowLookSpeedValue: this.requireElement(root, "[data-arrow-look-speed-value]"),
     };
     this.stationUi = {
       overlay: this.requireElement(root, "[data-station]"),
@@ -325,7 +339,7 @@ export class Aster3DGame {
       if (!this.gameOver && !this.settingsOpen && !this.stationOpen) {
         this.setStatus(
           document.pointerLockElement === this.canvas
-            ? "Mouse active. Mouse yaw/pitch, A/D yaw, Q/E roll, Shift boost, Space fire."
+            ? "Mouse active. Mouse or arrows yaw/pitch, A/D yaw, Q/E roll, Shift boost, Space fire."
             : "Click to engage cockpit controls",
           1.25,
         );
@@ -365,22 +379,53 @@ export class Aster3DGame {
       this.closeStation();
     });
 
-    this.settingsUi.invertHorizontal.addEventListener("change", () => {
-      this.controlSettings.invertHorizontal = this.settingsUi.invertHorizontal.checked;
+    this.settingsUi.mouseInvertHorizontal.addEventListener("change", () => {
+      this.controlSettings.mouseInvertHorizontal = this.settingsUi.mouseInvertHorizontal.checked;
       this.persistControlSettings();
       this.setStatus(
-        `Horizontal axis ${this.controlSettings.invertHorizontal ? "inverted" : "normal"}`,
+        `Mouse horizontal axis ${this.controlSettings.mouseInvertHorizontal ? "inverted" : "normal"}`,
         1.2,
       );
     });
 
-    this.settingsUi.invertVertical.addEventListener("change", () => {
-      this.controlSettings.invertVertical = this.settingsUi.invertVertical.checked;
+    this.settingsUi.mouseInvertVertical.addEventListener("change", () => {
+      this.controlSettings.mouseInvertVertical = this.settingsUi.mouseInvertVertical.checked;
       this.persistControlSettings();
       this.setStatus(
-        `Vertical axis ${this.controlSettings.invertVertical ? "inverted" : "normal"}`,
+        `Mouse vertical axis ${this.controlSettings.mouseInvertVertical ? "inverted" : "normal"}`,
         1.2,
       );
+    });
+
+    this.settingsUi.keyboardInvertHorizontal.addEventListener("change", () => {
+      this.controlSettings.keyboardInvertHorizontal = this.settingsUi.keyboardInvertHorizontal.checked;
+      this.persistControlSettings();
+      this.setStatus(
+        `Keyboard horizontal axis ${
+          this.controlSettings.keyboardInvertHorizontal ? "inverted" : "normal"
+        }`,
+        1.2,
+      );
+    });
+
+    this.settingsUi.keyboardInvertVertical.addEventListener("change", () => {
+      this.controlSettings.keyboardInvertVertical = this.settingsUi.keyboardInvertVertical.checked;
+      this.persistControlSettings();
+      this.setStatus(
+        `Keyboard vertical axis ${this.controlSettings.keyboardInvertVertical ? "inverted" : "normal"}`,
+        1.2,
+      );
+    });
+
+    this.settingsUi.arrowLookSpeed.addEventListener("input", () => {
+      this.controlSettings.arrowLookSpeed = clampNumber(
+        Number.parseInt(this.settingsUi.arrowLookSpeed.value, 10),
+        0,
+        100,
+      );
+      this.persistControlSettings();
+      this.syncSettingsUi();
+      this.setStatus(`Arrow turn rate ${this.controlSettings.arrowLookSpeed}%`, 1.2);
     });
   }
 
@@ -436,12 +481,20 @@ export class Aster3DGame {
     let yawDelta = yawInput * dt * 1.7;
     let pitchDelta = 0;
     let rollDelta = rollInput * dt * 1.95;
+    const mouseHorizontalSign = this.controlSettings.mouseInvertHorizontal ? 1 : -1;
+    const mouseVerticalSign = this.controlSettings.mouseInvertVertical ? 1 : -1;
+    const keyboardHorizontalSign = this.controlSettings.keyboardInvertHorizontal ? 1 : -1;
+    const keyboardVerticalSign = this.controlSettings.keyboardInvertVertical ? 1 : -1;
+    const arrowLookRate = this.getArrowLookRate();
+    const arrowYawInput = (this.keys.has("ArrowRight") ? 1 : 0) - (this.keys.has("ArrowLeft") ? 1 : 0);
+    const arrowPitchInput = (this.keys.has("ArrowDown") ? 1 : 0) - (this.keys.has("ArrowUp") ? 1 : 0);
+
+    yawDelta += arrowYawInput * dt * arrowLookRate * keyboardHorizontalSign;
+    pitchDelta += arrowPitchInput * dt * arrowLookRate * keyboardVerticalSign;
 
     if (pointerActive) {
-      const horizontalSign = this.controlSettings.invertHorizontal ? 1 : -1;
-      const verticalSign = this.controlSettings.invertVertical ? 1 : -1;
-      yawDelta += this.mouseLookX * 0.0024 * horizontalSign;
-      pitchDelta += this.mouseLookY * 0.002 * verticalSign;
+      yawDelta += this.mouseLookX * 0.0024 * mouseHorizontalSign;
+      pitchDelta += this.mouseLookY * 0.002 * mouseVerticalSign;
     }
 
     this.mouseLookX = 0;
@@ -2025,14 +2078,21 @@ export class Aster3DGame {
   }
 
   private syncSettingsUi(): void {
-    this.settingsUi.invertHorizontal.checked = this.controlSettings.invertHorizontal;
-    this.settingsUi.invertVertical.checked = this.controlSettings.invertVertical;
+    this.settingsUi.mouseInvertHorizontal.checked = this.controlSettings.mouseInvertHorizontal;
+    this.settingsUi.mouseInvertVertical.checked = this.controlSettings.mouseInvertVertical;
+    this.settingsUi.keyboardInvertHorizontal.checked = this.controlSettings.keyboardInvertHorizontal;
+    this.settingsUi.keyboardInvertVertical.checked = this.controlSettings.keyboardInvertVertical;
+    this.settingsUi.arrowLookSpeed.value = String(this.controlSettings.arrowLookSpeed);
+    this.settingsUi.arrowLookSpeedValue.textContent = `${this.controlSettings.arrowLookSpeed}%`;
   }
 
   private loadControlSettings(): ControlSettings {
     const fallback: ControlSettings = {
-      invertHorizontal: true,
-      invertVertical: true,
+      mouseInvertHorizontal: true,
+      mouseInvertVertical: true,
+      keyboardInvertHorizontal: true,
+      keyboardInvertVertical: false,
+      arrowLookSpeed: ARROW_LOOK_SPEED_DEFAULT,
     };
 
     const raw = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
@@ -2041,14 +2101,41 @@ export class Aster3DGame {
     }
 
     try {
-      const parsed = JSON.parse(raw) as Partial<ControlSettings>;
+      const parsed = JSON.parse(raw) as Partial<
+        ControlSettings & { invertHorizontal?: boolean; invertVertical?: boolean }
+      >;
+      const legacyHorizontal =
+        typeof parsed.invertHorizontal === "boolean" ? parsed.invertHorizontal : fallback.mouseInvertHorizontal;
+      const legacyVertical =
+        typeof parsed.invertVertical === "boolean" ? parsed.invertVertical : fallback.mouseInvertVertical;
+
       return {
-        invertHorizontal: Boolean(parsed.invertHorizontal),
-        invertVertical: Boolean(parsed.invertVertical),
+        mouseInvertHorizontal:
+          typeof parsed.mouseInvertHorizontal === "boolean" ? parsed.mouseInvertHorizontal : legacyHorizontal,
+        mouseInvertVertical:
+          typeof parsed.mouseInvertVertical === "boolean" ? parsed.mouseInvertVertical : legacyVertical,
+        keyboardInvertHorizontal:
+          typeof parsed.keyboardInvertHorizontal === "boolean"
+            ? parsed.keyboardInvertHorizontal
+            : legacyHorizontal,
+        keyboardInvertVertical:
+          typeof parsed.keyboardInvertVertical === "boolean"
+            ? parsed.keyboardInvertVertical
+            : fallback.keyboardInvertVertical,
+        arrowLookSpeed: clampNumber(
+          typeof parsed.arrowLookSpeed === "number" ? parsed.arrowLookSpeed : ARROW_LOOK_SPEED_DEFAULT,
+          0,
+          100,
+        ),
       };
     } catch {
       return fallback;
     }
+  }
+
+  private getArrowLookRate(): number {
+    const normalized = this.controlSettings.arrowLookSpeed / 100;
+    return ARROW_LOOK_SPEED_MIN + (ARROW_LOOK_SPEED_MAX - ARROW_LOOK_SPEED_MIN) * normalized;
   }
 
   private persistControlSettings(): void {
@@ -2119,8 +2206,12 @@ function quadraticBezierTangent(start: Vector3, control: Vector3, end: Vector3, 
 }
 
 function smoothstep(value: number): number {
-  const clamped = Math.min(1, Math.max(0, value));
+  const clamped = clampNumber(value, 0, 1);
   return clamped * clamped * (3 - 2 * clamped);
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
 
 function hashSector(seed: number, x: number, y: number, z: number): number {

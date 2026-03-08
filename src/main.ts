@@ -79,13 +79,38 @@ app.innerHTML = `
         <div class="overlay__card overlay__card--settings">
           <p class="overlay__eyebrow">Configuration</p>
           <h2>Control</h2>
+          <p class="settings-group__title">Mouse</p>
           <label class="toggle">
-            <input type="checkbox" data-invert-horizontal />
+            <input type="checkbox" data-mouse-invert-horizontal />
             <span>Invert horizontal axis</span>
           </label>
           <label class="toggle">
-            <input type="checkbox" data-invert-vertical />
+            <input type="checkbox" data-mouse-invert-vertical />
             <span>Invert vertical axis</span>
+          </label>
+          <p class="settings-group__title">Keyboard</p>
+          <label class="toggle">
+            <input type="checkbox" data-keyboard-invert-horizontal />
+            <span>Invert horizontal axis</span>
+          </label>
+          <label class="toggle">
+            <input type="checkbox" data-keyboard-invert-vertical />
+            <span>Invert vertical axis</span>
+          </label>
+          <label class="slider-field">
+            <span class="slider-field__label">
+              Arrow key turn rate
+              <strong data-arrow-look-speed-value>20%</strong>
+            </span>
+            <input
+              class="slider-field__input"
+              type="range"
+              min="0"
+              max="100"
+              step="1"
+              value="20"
+              data-arrow-look-speed
+            />
           </label>
           <button class="overlay__action" type="button" data-close-settings>Close</button>
         </div>

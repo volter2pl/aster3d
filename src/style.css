@@ -317,6 +317,18 @@ body {
   text-align: left;
 }
 
+.settings-group__title {
+  margin: 1rem 0 0.3rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.settings-group__title:first-of-type {
+  margin-top: 0.25rem;
+}
+
 .toggle {
   display: flex;
   align-items: center;
@@ -329,6 +341,33 @@ body {
 .toggle input {
   width: 1.15rem;
   height: 1.15rem;
+  accent-color: var(--accent);
+}
+
+.slider-field {
+  display: block;
+  margin: 1rem 0 0.4rem;
+  pointer-events: auto;
+}
+
+.slider-field__label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  color: var(--text);
+  font-size: 0.96rem;
+}
+
+.slider-field__label strong {
+  color: var(--accent);
+  font-size: 0.9rem;
+  letter-spacing: 0.08em;
+}
+
+.slider-field__input {
+  width: 100%;
+  margin-top: 0.65rem;
   accent-color: var(--accent);
 }
 

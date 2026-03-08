@@ -2031,8 +2031,8 @@ export class Aster3DGame {
 
   private loadControlSettings(): ControlSettings {
     const fallback: ControlSettings = {
-      invertHorizontal: false,
-      invertVertical: false,
+      invertHorizontal: true,
+      invertVertical: true,
     };
 
     const raw = window.localStorage.getItem(SETTINGS_STORAGE_KEY);

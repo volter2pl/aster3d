@@ -39,6 +39,7 @@ type Explosion = {
 };
 
 type HudRefs = {
+  cockpitOverlay: HTMLCanvasElement;
   score: HTMLElement;
   lives: HTMLElement;
   shield: HTMLElement;
@@ -198,6 +199,7 @@ export class Aster3DGame {
   private boostVisual = 0;
   private boostHoldTime = 0;
   private disposed = false;
+  private cockpitImageSource: HTMLCanvasElement | null = null;
 
   private readonly shipVelocity = new Vector3(0, 0, 0);
   private readonly autoDockPathStart = new Vector3();
@@ -219,6 +221,7 @@ export class Aster3DGame {
   constructor(root: HTMLElement) {
     this.canvas = this.requireElement<HTMLCanvasElement>(root, ".game-canvas");
     this.hud = {
+      cockpitOverlay: this.requireElement(root, "[data-cockpit-overlay]"),
       score: this.requireElement(root, "[data-score]"),
       lives: this.requireElement(root, "[data-lives]"),
       shield: this.requireElement(root, "[data-shield]"),
@@ -295,6 +298,7 @@ export class Aster3DGame {
   private bindEvents(): void {
     this.registerListener(window, "resize", () => {
       this.engine.resize();
+      this.redrawCockpitOverlay();
     });
 
     this.registerListener(window, "keydown", (event) => {
@@ -1867,87 +1871,74 @@ export class Aster3DGame {
   }
 
   private createCockpit(): void {
-    const cockpitMaterial = new StandardMaterial("cockpit-mat", this.scene);
-    cockpitMaterial.diffuseColor = new Color3(0.08, 0.12, 0.2);
-    cockpitMaterial.emissiveColor = new Color3(0.02, 0.13, 0.18);
-    cockpitMaterial.specularColor = new Color3(0.1, 0.18, 0.25);
-    cockpitMaterial.alpha = 0.96;
+    const image = new window.Image();
+    image.decoding = "async";
+    image.src = new URL("./assets/cockpits/cockpit-default.png", import.meta.url).href;
 
-    const accentMaterial = new StandardMaterial("accent-mat", this.scene);
-    accentMaterial.disableLighting = true;
-    accentMaterial.emissiveColor = new Color3(0.25, 0.85, 1);
-    accentMaterial.diffuseColor = new Color3(0.08, 0.45, 0.72);
+    this.registerListener(image, "load", () => {
+      const source = document.createElement("canvas");
+      source.width = image.naturalWidth;
+      source.height = image.naturalHeight;
 
-    const createPart = (
-      name: string,
-      dimensions: { width: number; height: number; depth: number },
-      position: Vector3,
-      rotation: Vector3,
-      material: StandardMaterial,
-    ): Mesh => {
-      const mesh = MeshBuilder.CreateBox(name, dimensions, this.scene);
-      mesh.parent = this.camera;
-      mesh.position.copyFrom(position);
-      mesh.rotation.copyFrom(rotation);
-      mesh.material = material;
-      return mesh;
-    };
+      const sourceContext = source.getContext("2d");
+      if (!sourceContext) {
+        return;
+      }
 
-    createPart(
-      "cockpit-left-frame",
-      { width: 0.08, height: 1.9, depth: 0.08 },
-      new Vector3(-1.08, -0.12, 2.3),
-      new Vector3(0, 0, -0.28),
-      cockpitMaterial,
-    );
+      sourceContext.imageSmoothingEnabled = false;
+      sourceContext.drawImage(image, 0, 0);
 
-    createPart(
-      "cockpit-right-frame",
-      { width: 0.08, height: 1.9, depth: 0.08 },
-      new Vector3(1.08, -0.12, 2.3),
-      new Vector3(0, 0, 0.28),
-      cockpitMaterial,
-    );
+      const pixels = sourceContext.getImageData(0, 0, source.width, source.height);
+      for (let index = 0; index < pixels.data.length; index += 4) {
+        const red = pixels.data[index];
+        const green = pixels.data[index + 1];
+        const blue = pixels.data[index + 2];
 
-    createPart(
-      "cockpit-top-frame",
-      { width: 2.4, height: 0.08, depth: 0.08 },
-      new Vector3(0, 0.82, 2.18),
-      new Vector3(0.09, 0, 0),
-      cockpitMaterial,
-    );
+        if (green > 180 && red < 80 && blue < 80) {
+          pixels.data[index + 3] = 0;
+        }
+      }
 
-    createPart(
-      "cockpit-console",
-      { width: 2.6, height: 0.42, depth: 0.9 },
-      new Vector3(0, -1.02, 1.52),
-      new Vector3(-0.2, 0, 0),
-      cockpitMaterial,
-    );
+      sourceContext.putImageData(pixels, 0, 0);
+      this.cockpitImageSource = source;
+      this.redrawCockpitOverlay();
+    });
+  }
 
-    createPart(
-      "cockpit-display-left",
-      { width: 0.46, height: 0.14, depth: 0.05 },
-      new Vector3(-0.64, -0.82, 1.16),
-      new Vector3(-0.5, 0.08, 0),
-      accentMaterial,
-    );
+  private redrawCockpitOverlay(): void {
+    const canvas = this.hud.cockpitOverlay;
+    const context = canvas.getContext("2d");
+    const source = this.cockpitImageSource;
+    if (!context) {
+      return;
+    }
 
-    createPart(
-      "cockpit-display-right",
-      { width: 0.46, height: 0.14, depth: 0.05 },
-      new Vector3(0.64, -0.82, 1.16),
-      new Vector3(-0.5, -0.08, 0),
-      accentMaterial,
-    );
+    const width = Math.max(1, Math.round(canvas.clientWidth));
+    const height = Math.max(1, Math.round(canvas.clientHeight));
+    const devicePixelRatio = window.devicePixelRatio || 1;
+    const targetWidth = Math.round(width * devicePixelRatio);
+    const targetHeight = Math.round(height * devicePixelRatio);
+    if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
+      canvas.width = targetWidth;
+      canvas.height = targetHeight;
+    }
 
-    createPart(
-      "cockpit-display-center",
-      { width: 0.36, height: 0.18, depth: 0.05 },
-      new Vector3(0, -0.74, 1.08),
-      new Vector3(-0.54, 0, 0),
-      accentMaterial,
-    );
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    if (!source) {
+      return;
+    }
+
+    context.scale(devicePixelRatio, devicePixelRatio);
+    context.imageSmoothingEnabled = false;
+
+    const scale = Math.max(width / source.width, height / source.height);
+    const drawWidth = source.width * scale;
+    const drawHeight = source.height * scale;
+    const drawX = (width - drawWidth) * 0.5;
+    const drawY = height - drawHeight;
+
+    context.drawImage(source, drawX, drawY, drawWidth, drawHeight);
   }
 
   private createStarfield(): void {

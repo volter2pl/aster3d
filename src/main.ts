@@ -11,6 +11,7 @@ app.innerHTML = `
   <div class="shell">
     <canvas class="game-canvas" aria-label="Aster3D game view"></canvas>
     <div class="hud" aria-hidden="true">
+      <canvas class="cockpit-overlay" data-cockpit-overlay></canvas>
       <div class="hud__top">
         <div class="panel">
           <span class="panel__label">Points</span>

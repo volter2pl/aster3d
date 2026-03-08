@@ -122,6 +122,47 @@ export class AudioManager {
     };
   }
 
+  public playPickup(): void {
+    const context = this.ensureContext();
+    if (context.state !== "running" || !this.master) {
+      return;
+    }
+
+    const now = context.currentTime;
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    const filter = context.createBiquadFilter();
+
+    oscillator.type = "triangle";
+    oscillator.frequency.setValueAtTime(420, now);
+    oscillator.frequency.linearRampToValueAtTime(620, now + 0.08);
+    oscillator.frequency.linearRampToValueAtTime(860, now + 0.18);
+
+    filter.type = "highpass";
+    filter.frequency.setValueAtTime(500, now);
+    filter.Q.value = 0.8;
+
+    this.applyEnvelope(gain, now, {
+      attack: 0.002,
+      decay: 0.08,
+      sustain: 0.28,
+      release: 0.12,
+      peak: 0.12,
+    });
+
+    oscillator.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.master);
+
+    oscillator.start(now);
+    oscillator.stop(now + 0.22);
+    oscillator.onended = () => {
+      oscillator.disconnect();
+      filter.disconnect();
+      gain.disconnect();
+    };
+  }
+
   private ensureContext(): AudioContext {
     if (this.context && this.master && this.noiseBuffer) {
       return this.context;

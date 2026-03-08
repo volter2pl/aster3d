@@ -13,11 +13,12 @@ import { AudioManager } from "./audio";
 
 type Asteroid = {
   mesh: Mesh;
-  velocity: Vector3;
   radius: number;
   size: number;
   durability: number;
   spin: Vector3;
+  velocity: Vector3;
+  sectorKey: string | null;
 };
 
 type Bullet = {
@@ -39,7 +40,11 @@ type HudRefs = {
   score: HTMLElement;
   lives: HTMLElement;
   shield: HTMLElement;
+  boost: HTMLElement;
   speed: HTMLElement;
+  objectiveDistance: HTMLElement;
+  objectiveEdge: HTMLElement;
+  objectiveEdgeArrow: HTMLElement;
   status: HTMLElement;
   overlay: HTMLElement;
   finalScore: HTMLElement;
@@ -58,14 +63,34 @@ type ControlSettings = {
   invertVertical: boolean;
 };
 
-const ARENA_RESPAWN_MIN = 70;
-const ARENA_RESPAWN_MAX = 150;
-const TARGET_ASTEROID_COUNT = 18;
+type SectorData = {
+  key: string;
+  x: number;
+  y: number;
+  z: number;
+  asteroids: Asteroid[];
+};
+
+type Collectible = {
+  mesh: Mesh;
+  pulse: number;
+  position: Vector3;
+};
+
+const WORLD_SECTOR_SIZE = 220;
+const WORLD_LOAD_RADIUS = 2;
+const WORLD_UNLOAD_RADIUS = 3;
 const SHIP_COLLISION_RADIUS = 2.2;
 const FIRE_INTERVAL = 0.12;
 const BULLET_SPEED = 155;
 const MAX_DELTA_TIME = 0.05;
 const SETTINGS_STORAGE_KEY = "aster3d-control-settings";
+const COLLECTIBLE_PICKUP_RADIUS = 7;
+const OBJECTIVE_MIN_DISTANCE = 520;
+const OBJECTIVE_MAX_DISTANCE = 760;
+const BOOST_MAX = 100;
+const BOOST_DRAIN_PER_SECOND = 38;
+const BOOST_REGEN_PER_SECOND = 22;
 
 export class Aster3DGame {
   private readonly canvas: HTMLCanvasElement;
@@ -78,29 +103,30 @@ export class Aster3DGame {
   private readonly starfieldRoot: TransformNode;
   private readonly audio = new AudioManager();
   private readonly keys = new Set<string>();
+  private readonly loadedSectors = new Map<string, SectorData>();
 
   private readonly asteroids: Asteroid[] = [];
   private readonly bullets: Bullet[] = [];
   private readonly explosions: Explosion[] = [];
 
-  private mouseDown = false;
   private mouseLookX = 0;
   private mouseLookY = 0;
-  private yaw = 0;
-  private pitch = 0;
-  private roll = 0;
   private score = 0;
   private lives = 3;
   private shield = 100;
   private invulnerability = 0;
   private fireCooldown = 0;
-  private asteroidSpawnCooldown = 0;
   private statusFlash = 0;
   private gameOver = false;
   private settingsOpen = false;
+  private worldSeed = Math.random();
+  private collectedSalvage = 0;
+  private boostCharge = BOOST_MAX;
 
   private readonly shipVelocity = new Vector3(0, 0, 0);
   private readonly controlSettings: ControlSettings;
+  private objective: Collectible | null = null;
+  private objectiveDirection = new Vector3(0.24, 0.08, 0.97).normalize();
 
   constructor(root: HTMLElement) {
     this.canvas = this.requireElement<HTMLCanvasElement>(root, ".game-canvas");
@@ -108,7 +134,11 @@ export class Aster3DGame {
       score: this.requireElement(root, "[data-score]"),
       lives: this.requireElement(root, "[data-lives]"),
       shield: this.requireElement(root, "[data-shield]"),
+      boost: this.requireElement(root, "[data-boost]"),
       speed: this.requireElement(root, "[data-speed]"),
+      objectiveDistance: this.requireElement(root, "[data-objective-distance]"),
+      objectiveEdge: this.requireElement(root, "[data-objective-edge]"),
+      objectiveEdgeArrow: this.requireElement(root, ".objective-edge__arrow"),
       status: this.requireElement(root, "[data-status]"),
       overlay: this.requireElement(root, "[data-game-over]"),
       finalScore: this.requireElement(root, "[data-final-score]"),
@@ -184,7 +214,6 @@ export class Aster3DGame {
 
     window.addEventListener("blur", () => {
       this.keys.clear();
-      this.mouseDown = false;
     });
 
     this.canvas.addEventListener("click", () => {
@@ -194,19 +223,7 @@ export class Aster3DGame {
       }
     });
 
-    this.canvas.addEventListener("mousedown", (event) => {
-      if (event.button === 0) {
-        this.mouseDown = true;
-      }
-    });
-
-    window.addEventListener("mouseup", (event) => {
-      if (event.button === 0) {
-        this.mouseDown = false;
-      }
-    });
-
-    window.addEventListener("mousemove", (event) => {
+    document.addEventListener("mousemove", (event) => {
       if (document.pointerLockElement !== this.canvas || this.gameOver) {
         return;
       }
@@ -216,14 +233,10 @@ export class Aster3DGame {
     });
 
     document.addEventListener("pointerlockchange", () => {
-      if (document.pointerLockElement !== this.canvas) {
-        this.mouseDown = false;
-      }
-
       if (!this.gameOver && !this.settingsOpen) {
         this.setStatus(
           document.pointerLockElement === this.canvas
-            ? "Mouse active. W/S thrust, A/D yaw, Shift boost, Space fire."
+            ? "Mouse active. Mouse yaw/pitch, A/D yaw, Q/E roll, Shift boost, Space fire."
             : "Click to engage cockpit controls",
           1.25,
         );
@@ -281,14 +294,14 @@ export class Aster3DGame {
 
     this.fireCooldown = Math.max(0, this.fireCooldown - dt);
     this.invulnerability = Math.max(0, this.invulnerability - dt);
-    this.asteroidSpawnCooldown = Math.max(0, this.asteroidSpawnCooldown - dt);
     this.statusFlash = Math.max(0, this.statusFlash - dt);
 
+    this.syncWorldSectors();
     this.updateShip(dt);
     this.updateBullets(dt);
     this.updateAsteroids(dt);
+    this.updateObjective(dt);
     this.updateExplosions(dt);
-    this.spawnAsteroidsIfNeeded();
 
     this.starfieldRoot.position.copyFrom(this.shipRoot.position);
     this.updateHud();
@@ -297,29 +310,41 @@ export class Aster3DGame {
   private updateShip(dt: number): void {
     const pointerActive = document.pointerLockElement === this.canvas;
     const yawInput = (this.keys.has("KeyD") ? 1 : 0) - (this.keys.has("KeyA") ? 1 : 0);
-    const thrustInput = (this.keys.has("KeyW") ? 1 : 0) - (this.keys.has("KeyS") ? 1 : 0) * 0.6;
-    const boost = this.keys.has("ShiftLeft") || this.keys.has("ShiftRight");
-    const fireRequested = this.keys.has("Space") || (pointerActive && this.mouseDown);
+    const rollInput = (this.keys.has("KeyE") ? 1 : 0) - (this.keys.has("KeyQ") ? 1 : 0);
+    const throttleInput = (this.keys.has("KeyW") ? 1 : 0) - (this.keys.has("KeyS") ? 1 : 0) * 0.6;
+    const boostRequested = this.keys.has("ShiftLeft") || this.keys.has("ShiftRight");
+    const boostActive = boostRequested && this.boostCharge > 0;
+    const fireRequested = this.keys.has("Space");
+
+    let yawDelta = yawInput * dt * 1.7;
+    let pitchDelta = 0;
+    let rollDelta = rollInput * dt * 1.95;
 
     if (pointerActive) {
       const horizontalSign = this.controlSettings.invertHorizontal ? 1 : -1;
       const verticalSign = this.controlSettings.invertVertical ? 1 : -1;
-      this.yaw += this.mouseLookX * 0.0024 * horizontalSign;
-      this.pitch = clamp(this.pitch + this.mouseLookY * 0.002 * verticalSign, -1.1, 1.1);
+      yawDelta += this.mouseLookX * 0.0024 * horizontalSign;
+      pitchDelta += this.mouseLookY * 0.002 * verticalSign;
     }
 
     this.mouseLookX = 0;
     this.mouseLookY = 0;
 
-    this.yaw += yawInput * dt * 1.75;
-    this.roll = damp(this.roll, -(yawInput * 0.22), 4.6, dt);
-
-    this.shipRoot.rotationQuaternion = Quaternion.RotationYawPitchRoll(this.yaw, this.pitch, this.roll);
+    const orientation = this.shipRoot.rotationQuaternion ?? Quaternion.Identity();
+    const localDelta = Quaternion.RotationYawPitchRoll(yawDelta, pitchDelta, rollDelta);
+    this.shipRoot.rotationQuaternion = orientation.multiply(localDelta).normalize();
 
     const forward = this.camera.getDirection(Vector3.Forward(this.scene.useRightHandedSystem)).normalize();
-    const thrust = boost ? 66 : 42;
+    const thrustInput = boostActive && throttleInput <= 0 ? 1 : throttleInput;
+    const thrust = boostActive ? 76 : 42;
     if (thrustInput !== 0) {
       this.shipVelocity.addInPlace(forward.scale(thrustInput * thrust * dt));
+    }
+
+    if (boostActive) {
+      this.boostCharge = Math.max(0, this.boostCharge - BOOST_DRAIN_PER_SECOND * dt);
+    } else {
+      this.boostCharge = Math.min(BOOST_MAX, this.boostCharge + BOOST_REGEN_PER_SECOND * dt);
     }
 
     this.shipVelocity.scaleInPlace(Math.exp(-0.55 * dt));
@@ -372,8 +397,14 @@ export class Aster3DGame {
       asteroid.mesh.rotation.y += asteroid.spin.y * dt;
       asteroid.mesh.rotation.z += asteroid.spin.z * dt;
 
-      if (Vector3.DistanceSquared(this.shipRoot.position, asteroid.mesh.position) > 95_000) {
-        this.repositionAsteroid(asteroid);
+      if (
+        asteroid.sectorKey === null &&
+        Vector3.DistanceSquared(this.shipRoot.position, asteroid.mesh.position) >
+          (WORLD_SECTOR_SIZE * (WORLD_UNLOAD_RADIUS + 1.5)) ** 2
+      ) {
+        this.disposeAsteroid(asteroid);
+        this.asteroids.splice(index, 1);
+        continue;
       }
 
       const collisionRadius = asteroid.radius + SHIP_COLLISION_RADIUS;
@@ -386,7 +417,10 @@ export class Aster3DGame {
         this.applyShipDamage(impactDamage);
         this.spawnExplosion(asteroid.mesh.position, asteroid.size * 0.8, new Color3(1, 0.43, 0.3));
         this.audio.playExplosion(asteroid.size * 0.2);
-        this.repositionAsteroid(asteroid);
+        const pushDirection = this.shipRoot.position.subtract(asteroid.mesh.position);
+        if (pushDirection.lengthSquared() > 0.01) {
+          this.shipRoot.position.addInPlace(pushDirection.normalize().scale(collisionRadius + 2));
+        }
       }
     }
   }
@@ -451,6 +485,7 @@ export class Aster3DGame {
     const nextSize = asteroid.size * 0.62;
 
     this.score += Math.round(asteroid.size * 28);
+    this.detachAsteroidFromSector(asteroid);
     asteroid.mesh.dispose();
     this.asteroids.splice(index, 1);
     this.spawnExplosion(impactPosition, asteroid.size * 0.9, new Color3(1, 0.68, 0.34));
@@ -458,7 +493,11 @@ export class Aster3DGame {
 
     if (nextSize > 1.65) {
       const splitDirection = randomUnitVector();
-      this.spawnAsteroid(nextSize, impactPosition.add(splitDirection.scale(nextSize * 1.2)), asteroidVelocity.add(splitDirection.scale(8)));
+      this.spawnAsteroid(
+        nextSize,
+        impactPosition.add(splitDirection.scale(nextSize * 1.2)),
+        asteroidVelocity.add(splitDirection.scale(8)),
+      );
       this.spawnAsteroid(
         nextSize * 0.92,
         impactPosition.add(splitDirection.scale(-nextSize * 1.2)),
@@ -487,20 +526,92 @@ export class Aster3DGame {
     }
 
     this.setStatus(`Ship lost. ${this.lives} lives remaining. Relaunching...`, 1.8);
-    this.resetShipState();
-    this.seedAsteroids();
+    this.resetShipState(true);
   }
 
-  private spawnAsteroidsIfNeeded(): void {
-    if (this.asteroidSpawnCooldown > 0 || this.asteroids.length >= TARGET_ASTEROID_COUNT) {
+  private syncWorldSectors(): void {
+    const centerX = Math.floor(this.shipRoot.position.x / WORLD_SECTOR_SIZE);
+    const centerY = Math.floor(this.shipRoot.position.y / WORLD_SECTOR_SIZE);
+    const centerZ = Math.floor(this.shipRoot.position.z / WORLD_SECTOR_SIZE);
+
+    for (let offsetX = -WORLD_LOAD_RADIUS; offsetX <= WORLD_LOAD_RADIUS; offsetX += 1) {
+      for (let offsetY = -WORLD_LOAD_RADIUS; offsetY <= WORLD_LOAD_RADIUS; offsetY += 1) {
+        for (let offsetZ = -WORLD_LOAD_RADIUS; offsetZ <= WORLD_LOAD_RADIUS; offsetZ += 1) {
+          if (offsetX * offsetX + offsetY * offsetY + offsetZ * offsetZ > WORLD_LOAD_RADIUS * WORLD_LOAD_RADIUS) {
+            continue;
+          }
+
+          const x = centerX + offsetX;
+          const y = centerY + offsetY;
+          const z = centerZ + offsetZ;
+          const key = sectorKey(x, y, z);
+          if (!this.loadedSectors.has(key)) {
+            this.loadSector(x, y, z);
+          }
+        }
+      }
+    }
+
+    for (const sector of [...this.loadedSectors.values()]) {
+      const dx = sector.x - centerX;
+      const dy = sector.y - centerY;
+      const dz = sector.z - centerZ;
+      if (dx * dx + dy * dy + dz * dz > WORLD_UNLOAD_RADIUS * WORLD_UNLOAD_RADIUS) {
+        this.unloadSector(sector.key);
+      }
+    }
+  }
+
+  private loadSector(x: number, y: number, z: number): void {
+    const key = sectorKey(x, y, z);
+    const rng = mulberry32(hashSector(this.worldSeed, x, y, z));
+    const asteroidCount = 1 + (rng() > 0.35 ? 1 : 0) + (rng() > 0.88 ? 1 : 0);
+    const sector: SectorData = { key, x, y, z, asteroids: [] };
+
+    for (let index = 0; index < asteroidCount; index += 1) {
+      const position = new Vector3(
+        x * WORLD_SECTOR_SIZE + rng() * WORLD_SECTOR_SIZE,
+        y * WORLD_SECTOR_SIZE + rng() * WORLD_SECTOR_SIZE,
+        z * WORLD_SECTOR_SIZE + rng() * WORLD_SECTOR_SIZE,
+      );
+
+      const asteroid = this.spawnAsteroid(
+        randomBetween(2.1, 5.6, rng),
+        position,
+        Vector3.Zero(),
+        key,
+        rng,
+      );
+      sector.asteroids.push(asteroid);
+    }
+
+    this.loadedSectors.set(key, sector);
+  }
+
+  private unloadSector(key: string): void {
+    const sector = this.loadedSectors.get(key);
+    if (!sector) {
       return;
     }
 
-    this.spawnAsteroid(randomBetween(2.2, 5.2));
-    this.asteroidSpawnCooldown = 0.9;
+    for (const asteroid of sector.asteroids) {
+      this.disposeAsteroid(asteroid);
+      const index = this.asteroids.indexOf(asteroid);
+      if (index >= 0) {
+        this.asteroids.splice(index, 1);
+      }
+    }
+
+    this.loadedSectors.delete(key);
   }
 
-  private spawnAsteroid(size: number, position?: Vector3, velocity?: Vector3): void {
+  private spawnAsteroid(
+    size: number,
+    position: Vector3,
+    velocity: Vector3 = Vector3.Zero(),
+    sectorKeyValue: string | null = null,
+    rng: () => number = Math.random,
+  ): Asteroid {
     const asteroidMesh = MeshBuilder.CreateIcoSphere(
       `asteroid-${performance.now()}`,
       { radius: size, subdivisions: size > 2.5 ? 1 : 0 },
@@ -508,47 +619,40 @@ export class Aster3DGame {
     );
     asteroidMesh.convertToFlatShadedMesh();
     asteroidMesh.scaling = new Vector3(
-      randomBetween(0.7, 1.4),
-      randomBetween(0.72, 1.36),
-      randomBetween(0.74, 1.44),
+      randomBetween(0.7, 1.4, rng),
+      randomBetween(0.72, 1.36, rng),
+      randomBetween(0.74, 1.44, rng),
     );
-    asteroidMesh.position.copyFrom(position ?? this.randomSpawnPoint());
+    asteroidMesh.position.copyFrom(position);
     asteroidMesh.rotation = new Vector3(
-      randomBetween(0, Math.PI),
-      randomBetween(0, Math.PI),
-      randomBetween(0, Math.PI),
+      randomBetween(0, Math.PI, rng),
+      randomBetween(0, Math.PI, rng),
+      randomBetween(0, Math.PI, rng),
     );
 
     const asteroidMaterial = new StandardMaterial(`asteroid-mat-${performance.now()}`, this.scene);
-    const hueShift = randomBetween(-0.04, 0.08);
+    const hueShift = randomBetween(-0.04, 0.08, rng);
     asteroidMaterial.diffuseColor = new Color3(0.31 + hueShift, 0.27 + hueShift * 0.65, 0.24 + hueShift * 0.4);
     asteroidMaterial.emissiveColor = new Color3(0.02, 0.03, 0.045);
     asteroidMaterial.specularColor = Color3.Black();
     asteroidMesh.material = asteroidMaterial;
 
-    this.asteroids.push({
+    const asteroid: Asteroid = {
       mesh: asteroidMesh,
-      velocity:
-        velocity ??
-        randomUnitVector()
-          .scale(randomBetween(5.5, 15))
-          .add(this.shipVelocity.scale(randomBetween(0.1, 0.25))),
+      velocity,
       radius: size * Math.max(asteroidMesh.scaling.x, asteroidMesh.scaling.y, asteroidMesh.scaling.z),
       size,
       durability: Math.max(1, Math.round(size * 1.15)),
       spin: new Vector3(
-        randomBetween(-1.2, 1.2),
-        randomBetween(-1.1, 1.1),
-        randomBetween(-1.3, 1.3),
+        randomBetween(-1.2, 1.2, rng),
+        randomBetween(-1.1, 1.1, rng),
+        randomBetween(-1.3, 1.3, rng),
       ),
-    });
-  }
+      sectorKey: sectorKeyValue,
+    };
 
-  private repositionAsteroid(asteroid: Asteroid): void {
-    asteroid.mesh.position.copyFrom(this.randomSpawnPoint());
-    asteroid.velocity = randomUnitVector()
-      .scale(randomBetween(4.8, 12.5))
-      .add(this.shipVelocity.scale(randomBetween(0.12, 0.22)));
+    this.asteroids.push(asteroid);
+    return asteroid;
   }
 
   private spawnExplosion(position: Vector3, radius: number, color: Color3): void {
@@ -589,53 +693,32 @@ export class Aster3DGame {
     this.score = 0;
     this.lives = 3;
     this.shield = 100;
+    this.boostCharge = BOOST_MAX;
     this.gameOver = false;
+    this.collectedSalvage = 0;
+    this.worldSeed = Math.random();
+    this.objectiveDirection = new Vector3(0.24, 0.08, 0.97).normalize();
     this.hud.overlay.classList.add("hidden");
     this.setStatus("Click to engage cockpit controls", 1.8);
-    this.resetShipState();
-    this.seedAsteroids();
+    this.clearWorld();
+    this.resetShipState(false);
+    this.spawnNextObjective(this.shipRoot.position.clone(), true);
+    this.syncWorldSectors();
     this.clearBullets();
     this.clearExplosions();
     this.updateHud();
   }
 
-  private resetShipState(): void {
-    this.shipRoot.position.copyFromFloats(0, 0, 0);
+  private resetShipState(keepPosition: boolean): void {
+    if (!keepPosition) {
+      this.shipRoot.position.copyFromFloats(0, 0, 0);
+    }
     this.shipVelocity.copyFromFloats(0, 0, 0);
-    this.yaw = 0;
-    this.pitch = 0;
-    this.roll = 0;
     this.shipRoot.rotationQuaternion = Quaternion.Identity();
     this.shield = 100;
+    this.boostCharge = BOOST_MAX;
     this.invulnerability = 2.2;
     this.fireCooldown = 0;
-  }
-
-  private seedAsteroids(): void {
-    for (const asteroid of this.asteroids) {
-      const material = asteroid.mesh.material;
-      asteroid.mesh.dispose();
-      if (material instanceof StandardMaterial) {
-        material.dispose();
-      }
-    }
-
-    this.asteroids.length = 0;
-
-    for (let index = 0; index < 5; index += 1) {
-      this.spawnAsteroid(
-        randomBetween(2.6, 4.8),
-        new Vector3(
-          randomBetween(-22, 22),
-          randomBetween(-14, 14),
-          randomBetween(55, 95),
-        ),
-      );
-    }
-
-    for (let index = this.asteroids.length; index < TARGET_ASTEROID_COUNT; index += 1) {
-      this.spawnAsteroid(randomBetween(2.2, 5.4));
-    }
   }
 
   private clearBullets(): void {
@@ -650,6 +733,104 @@ export class Aster3DGame {
       explosion.material.dispose();
     }
     this.explosions.length = 0;
+  }
+
+  private clearWorld(): void {
+    this.disposeObjective();
+    for (const asteroid of [...this.asteroids]) {
+      this.disposeAsteroid(asteroid);
+    }
+    this.asteroids.length = 0;
+    this.loadedSectors.clear();
+  }
+
+  private disposeAsteroid(asteroid: Asteroid): void {
+    const material = asteroid.mesh.material;
+    asteroid.mesh.dispose();
+    if (material instanceof StandardMaterial) {
+      material.dispose();
+    }
+  }
+
+  private detachAsteroidFromSector(asteroid: Asteroid): void {
+    if (!asteroid.sectorKey) {
+      return;
+    }
+
+    const sector = this.loadedSectors.get(asteroid.sectorKey);
+    if (!sector) {
+      return;
+    }
+
+    sector.asteroids = sector.asteroids.filter((candidate) => candidate !== asteroid);
+  }
+
+  private updateObjective(dt: number): void {
+    if (!this.objective) {
+      return;
+    }
+
+    this.objective.pulse += dt;
+    const bob = 1 + Math.sin(this.objective.pulse * 3.2) * 0.12;
+    this.objective.mesh.scaling.setAll(bob);
+    this.objective.mesh.rotation.y += dt * 1.4;
+    this.objective.mesh.rotation.x += dt * 0.5;
+
+    if (
+      Vector3.DistanceSquared(this.shipRoot.position, this.objective.position) <=
+      COLLECTIBLE_PICKUP_RADIUS * COLLECTIBLE_PICKUP_RADIUS
+    ) {
+      this.collectedSalvage += 1;
+      this.score += 120;
+      this.audio.playPickup();
+      const nextAnchor = this.objective.position.clone();
+      this.spawnExplosion(this.objective.position, 3.8, new Color3(0.38, 1, 0.72));
+      this.audio.playExplosion(0.72);
+      this.disposeObjective();
+      this.spawnNextObjective(nextAnchor, false);
+      this.setStatus(`Salvage secured. Cargo ${this.collectedSalvage}. Next marker locked.`, 2.4);
+    }
+  }
+
+  private spawnNextObjective(anchor: Vector3, firstObjective: boolean): void {
+    this.disposeObjective();
+
+    const jitter = randomUnitVector().scale(randomBetween(40, 140));
+    this.objectiveDirection = this.objectiveDirection.scale(0.72).add(randomUnitVector().scale(0.28)).normalize();
+    const distance = firstObjective ? 420 : randomBetween(OBJECTIVE_MIN_DISTANCE, OBJECTIVE_MAX_DISTANCE);
+    const position = anchor.add(this.objectiveDirection.scale(distance)).add(jitter);
+
+    const mesh = MeshBuilder.CreatePolyhedron(
+      `salvage-${performance.now()}`,
+      { type: 1, size: 2.5 },
+      this.scene,
+    );
+    mesh.position.copyFrom(position);
+
+    const material = new StandardMaterial(`salvage-mat-${performance.now()}`, this.scene);
+    material.disableLighting = true;
+    material.emissiveColor = new Color3(0.36, 1, 0.74);
+    material.diffuseColor = new Color3(0.16, 0.56, 0.42);
+    mesh.material = material;
+
+    this.objective = {
+      mesh,
+      pulse: 0,
+      position,
+    };
+  }
+
+  private disposeObjective(): void {
+    if (!this.objective) {
+      return;
+    }
+
+    const material = this.objective.mesh.material;
+    this.objective.mesh.dispose();
+    if (material instanceof StandardMaterial) {
+      material.dispose();
+    }
+    this.objective = null;
   }
 
   private createCockpit(): void {
@@ -756,11 +937,81 @@ export class Aster3DGame {
     this.hud.score.textContent = this.score.toString();
     this.hud.lives.textContent = this.lives.toString();
     this.hud.shield.textContent = `${Math.round(this.shield)}%`;
+    this.hud.boost.textContent = `${Math.round(this.boostCharge)}%`;
     this.hud.speed.textContent = Math.round(this.shipVelocity.length()).toString();
+    this.updateObjectiveHud();
 
     if (this.statusFlash === 0 && !this.gameOver && document.pointerLockElement === this.canvas) {
-      this.hud.status.textContent = "W/S thrust  A/D yaw  Mouse look  Shift boost  Space fire";
+      this.hud.status.textContent = "Mouse yaw/pitch  A/D yaw  Q/E roll  Shift boost  Space fire";
     }
+  }
+
+  private updateObjectiveHud(): void {
+    if (!this.objective) {
+      this.hud.objectiveDistance.textContent = "--";
+      this.hud.objectiveEdge.classList.add("hidden");
+      return;
+    }
+
+    const toObjective = this.objective.position.subtract(this.camera.globalPosition);
+    const distance = toObjective.length();
+    this.hud.objectiveDistance.textContent = `${Math.round(distance)}m`;
+
+    const width = this.canvas.clientWidth;
+    const height = this.canvas.clientHeight;
+    if (width === 0 || height === 0 || distance < 0.001) {
+      this.hud.objectiveEdge.classList.add("hidden");
+      return;
+    }
+
+    const forward = this.camera.getDirection(Vector3.Forward(this.scene.useRightHandedSystem)).normalize();
+    const right = this.camera.getDirection(Vector3.Right()).normalize();
+    const up = this.camera.getDirection(Vector3.Up()).normalize();
+
+    const localX = Vector3.Dot(toObjective, right);
+    const localY = Vector3.Dot(toObjective, up);
+    const localZ = Vector3.Dot(toObjective, forward);
+    const aspect = width / height;
+    const tanHalfFov = Math.tan(this.camera.fov * 0.5);
+    const projectedX = localX / Math.max(Math.abs(localZ), 0.001) / (tanHalfFov * aspect);
+    const projectedY = localY / Math.max(Math.abs(localZ), 0.001) / tanHalfFov;
+
+    const onScreen =
+      localZ > 0 &&
+      Math.abs(projectedX) <= 1 &&
+      Math.abs(projectedY) <= 1;
+
+    if (onScreen) {
+      this.hud.objectiveEdge.classList.add("hidden");
+      return;
+    }
+
+    let screenDirX = localX;
+    let screenDirY = -localY;
+    if (localZ < 0) {
+      screenDirX *= -1;
+      screenDirY *= -1;
+    }
+
+    if (Math.abs(screenDirX) < 0.001 && Math.abs(screenDirY) < 0.001) {
+      screenDirY = -1;
+    }
+
+    const edgePadding = 42;
+    const centerX = width * 0.5;
+    const centerY = height * 0.5;
+    const scale = Math.min(
+      (centerX - edgePadding) / Math.max(Math.abs(screenDirX), 0.001),
+      (centerY - edgePadding) / Math.max(Math.abs(screenDirY), 0.001),
+    );
+    const edgeX = centerX + screenDirX * scale;
+    const edgeY = centerY + screenDirY * scale;
+    const angle = Math.atan2(screenDirY, screenDirX) * (180 / Math.PI) + 90;
+
+    this.hud.objectiveEdge.style.left = `${edgeX}px`;
+    this.hud.objectiveEdge.style.top = `${edgeY}px`;
+    this.hud.objectiveEdgeArrow.style.transform = `rotate(${angle}deg)`;
+    this.hud.objectiveEdge.classList.remove("hidden");
   }
 
   private setStatus(text: string, duration: number): void {
@@ -770,7 +1021,6 @@ export class Aster3DGame {
 
   private openSettings(): void {
     this.settingsOpen = true;
-    this.mouseDown = false;
     this.keys.clear();
     this.settingsUi.overlay.classList.remove("hidden");
     if (document.pointerLockElement === this.canvas) {
@@ -816,10 +1066,6 @@ export class Aster3DGame {
     window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(this.controlSettings));
   }
 
-  private randomSpawnPoint(): Vector3 {
-    return this.shipRoot.position.add(randomUnitVector().scale(randomBetween(ARENA_RESPAWN_MIN, ARENA_RESPAWN_MAX)));
-  }
-
   private requireElement<T extends HTMLElement>(root: ParentNode, selector: string): T {
     const element = root.querySelector<T>(selector);
     if (!element) {
@@ -829,8 +1075,8 @@ export class Aster3DGame {
   }
 }
 
-function randomBetween(min: number, max: number): number {
-  return min + Math.random() * (max - min);
+function randomBetween(min: number, max: number, rng: () => number = Math.random): number {
+  return min + rng() * (max - min);
 }
 
 function randomUnitVector(): Vector3 {
@@ -847,10 +1093,21 @@ function randomUnitVector(): Vector3 {
   return vector.normalize();
 }
 
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
+function sectorKey(x: number, y: number, z: number): string {
+  return `${x}:${y}:${z}`;
 }
 
-function damp(current: number, target: number, lambda: number, dt: number): number {
-  return current + (target - current) * (1 - Math.exp(-lambda * dt));
+function hashSector(seed: number, x: number, y: number, z: number): number {
+  let hash = Math.floor(seed * 1_000_000_000) ^ (x * 374761393) ^ (y * 668265263) ^ (z * 2147483647);
+  hash = Math.imul(hash ^ (hash >>> 13), 1274126177);
+  return (hash ^ (hash >>> 16)) >>> 0;
+}
+
+function mulberry32(seed: number): () => number {
+  return () => {
+    let state = (seed += 0x6d2b79f5);
+    state = Math.imul(state ^ (state >>> 15), state | 1);
+    state ^= state + Math.imul(state ^ (state >>> 7), state | 61);
+    return ((state ^ (state >>> 14)) >>> 0) / 4294967296;
+  };
 }

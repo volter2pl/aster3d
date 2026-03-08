@@ -25,6 +25,10 @@ app.innerHTML = `
           <span class="panel__value" data-shield>100%</span>
         </div>
         <div class="panel">
+          <span class="panel__label">Boost</span>
+          <span class="panel__value" data-boost>100%</span>
+        </div>
+        <div class="panel">
           <span class="panel__label">Speed</span>
           <span class="panel__value" data-speed>0</span>
         </div>
@@ -32,10 +36,20 @@ app.innerHTML = `
           <span class="panel__label">Config</span>
           <span class="panel__value">Control</span>
         </button>
+        <div class="panel panel--objective">
+          <span class="panel__label">Target</span>
+          <span class="panel__value panel__value--objective">
+            <span data-objective-distance>--</span>
+          </span>
+        </div>
       </div>
       <div class="reticle">
         <span></span>
         <span></span>
+      </div>
+      <div class="objective-edge hidden" data-objective-edge>
+        <span class="objective-edge__arrow">▲</span>
+        <span class="objective-edge__label">SALVAGE</span>
       </div>
       <div class="hud__bottom">
         <div class="status" data-status>Click to engage cockpit controls</div>

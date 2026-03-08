@@ -2,6 +2,9 @@
 
 Przegladarkowa gra inspirowana Asteroids, ale w 3D i z widokiem z kokpitu statku kosmicznego.
 
+Zagraj online:
+https://volter2pl.github.io/aster3d/
+
 ## Stack
 
 - `Babylon.js`
@@ -40,10 +43,11 @@ Kazdy push na `main`:
 
 - `Klik` - aktywacja pointer lock
 - `Mysz` - rozgladanie i celowanie
+- `Strzalki` - pitch / yaw
 - `W / S` - ciag do przodu / hamowanie wsteczne
 - `A / D` - yaw
 - `Shift` - boost
-- `Spacja` lub `LPM` - strzal
+- `Spacja` - strzal
 - `R` - restart po game over
 
 ## Zakres MVP

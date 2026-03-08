@@ -145,4 +145,12 @@ app.innerHTML = `
   </div>
 `;
 
-new Aster3DGame(app);
+const game = new Aster3DGame(app);
+
+if (import.meta.hot) {
+  import.meta.hot.accept();
+  import.meta.hot.dispose(() => {
+    game.dispose();
+    app.innerHTML = "";
+  });
+}

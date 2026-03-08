@@ -167,6 +167,7 @@ export class Aster3DGame {
   private readonly keys = new Set<string>();
   private readonly loadedSectors = new Map<string, SectorData>();
   private readonly baseChevronMaterials: StandardMaterial[] = [];
+  private readonly cleanupCallbacks: Array<() => void> = [];
 
   private readonly asteroids: Asteroid[] = [];
   private readonly enemies: Enemy[] = [];
@@ -196,12 +197,22 @@ export class Aster3DGame {
   private boostCharge = BOOST_MAX;
   private boostVisual = 0;
   private boostHoldTime = 0;
+  private disposed = false;
 
   private readonly shipVelocity = new Vector3(0, 0, 0);
   private readonly autoDockPathStart = new Vector3();
   private readonly autoDockPathControl = new Vector3();
   private readonly autoDockPathEnd = new Vector3();
   private readonly controlSettings: ControlSettings;
+  private readonly renderLoop = (): void => {
+    if (this.disposed) {
+      return;
+    }
+
+    const dt = Math.min(this.engine.getDeltaTime() / 1000, MAX_DELTA_TIME);
+    this.update(dt);
+    this.scene.render();
+  };
   private baseShieldMaterial: StandardMaterial | null = null;
   private objectiveDirection = new Vector3(0.24, 0.08, 0.97).normalize();
 
@@ -278,25 +289,22 @@ export class Aster3DGame {
     this.bindEvents();
     this.resetRun();
 
-    this.engine.runRenderLoop(() => {
-      const dt = Math.min(this.engine.getDeltaTime() / 1000, MAX_DELTA_TIME);
-      this.update(dt);
-      this.scene.render();
-    });
+    this.engine.runRenderLoop(this.renderLoop);
   }
 
   private bindEvents(): void {
-    window.addEventListener("resize", () => {
+    this.registerListener(window, "resize", () => {
       this.engine.resize();
     });
 
-    window.addEventListener("keydown", (event) => {
-      if (this.stationOpen && event.code === "Escape") {
+    this.registerListener(window, "keydown", (event) => {
+      const keyboardEvent = event as KeyboardEvent;
+      if (this.stationOpen && keyboardEvent.code === "Escape") {
         this.closeStation();
         return;
       }
 
-      if (this.settingsOpen && event.code === "Escape") {
+      if (this.settingsOpen && keyboardEvent.code === "Escape") {
         this.closeSettings();
         return;
       }
@@ -309,37 +317,42 @@ export class Aster3DGame {
         return;
       }
 
-      this.keys.add(event.code);
-      if (event.code === "Space" || event.code === "ShiftLeft" || event.code === "ShiftRight") {
-        event.preventDefault();
+      this.keys.add(keyboardEvent.code);
+      if (
+        keyboardEvent.code === "Space" ||
+        keyboardEvent.code === "ShiftLeft" ||
+        keyboardEvent.code === "ShiftRight"
+      ) {
+        keyboardEvent.preventDefault();
       }
     });
 
-    window.addEventListener("keyup", (event) => {
-      this.keys.delete(event.code);
+    this.registerListener(window, "keyup", (event) => {
+      this.keys.delete((event as KeyboardEvent).code);
     });
 
-    window.addEventListener("blur", () => {
+    this.registerListener(window, "blur", () => {
       this.keys.clear();
     });
 
-    this.canvas.addEventListener("click", () => {
+    this.registerListener(this.canvas, "click", () => {
       void this.audio.resume();
       if (document.pointerLockElement !== this.canvas) {
         void this.canvas.requestPointerLock();
       }
     });
 
-    document.addEventListener("mousemove", (event) => {
+    this.registerListener(document, "mousemove", (event) => {
+      const mouseEvent = event as MouseEvent;
       if (document.pointerLockElement !== this.canvas || this.gameOver) {
         return;
       }
 
-      this.mouseLookX += event.movementX;
-      this.mouseLookY += event.movementY;
+      this.mouseLookX += mouseEvent.movementX;
+      this.mouseLookY += mouseEvent.movementY;
     });
 
-    document.addEventListener("pointerlockchange", () => {
+    this.registerListener(document, "pointerlockchange", () => {
       if (!this.hasActivePointerLock()) {
         this.keys.clear();
         this.mouseLookX = 0;
@@ -357,40 +370,40 @@ export class Aster3DGame {
       }
     });
 
-    this.settingsUi.openButton.addEventListener("click", () => {
+    this.registerListener(this.settingsUi.openButton, "click", () => {
       void this.audio.resume();
       this.openSettings();
     });
 
-    this.settingsUi.closeButton.addEventListener("click", () => {
+    this.registerListener(this.settingsUi.closeButton, "click", () => {
       this.closeSettings();
     });
 
-    this.settingsUi.overlay.addEventListener("click", (event) => {
+    this.registerListener(this.settingsUi.overlay, "click", (event) => {
       if (event.target === this.settingsUi.overlay) {
         this.closeSettings();
       }
     });
 
-    this.stationUi.overlay.addEventListener("click", (event) => {
+    this.registerListener(this.stationUi.overlay, "click", (event) => {
       if (event.target === this.stationUi.overlay) {
         this.closeStation();
       }
     });
 
-    this.stationUi.sellButton.addEventListener("click", () => {
+    this.registerListener(this.stationUi.sellButton, "click", () => {
       this.sellSalvage();
     });
 
-    this.stationUi.repairButton.addEventListener("click", () => {
+    this.registerListener(this.stationUi.repairButton, "click", () => {
       this.repairShields();
     });
 
-    this.stationUi.undockButton.addEventListener("click", () => {
+    this.registerListener(this.stationUi.undockButton, "click", () => {
       this.closeStation();
     });
 
-    this.settingsUi.mouseInvertHorizontal.addEventListener("change", () => {
+    this.registerListener(this.settingsUi.mouseInvertHorizontal, "change", () => {
       this.controlSettings.mouseInvertHorizontal = this.settingsUi.mouseInvertHorizontal.checked;
       this.persistControlSettings();
       this.setStatus(
@@ -399,7 +412,7 @@ export class Aster3DGame {
       );
     });
 
-    this.settingsUi.mouseInvertVertical.addEventListener("change", () => {
+    this.registerListener(this.settingsUi.mouseInvertVertical, "change", () => {
       this.controlSettings.mouseInvertVertical = this.settingsUi.mouseInvertVertical.checked;
       this.persistControlSettings();
       this.setStatus(
@@ -408,7 +421,7 @@ export class Aster3DGame {
       );
     });
 
-    this.settingsUi.keyboardInvertHorizontal.addEventListener("change", () => {
+    this.registerListener(this.settingsUi.keyboardInvertHorizontal, "change", () => {
       this.controlSettings.keyboardInvertHorizontal = this.settingsUi.keyboardInvertHorizontal.checked;
       this.persistControlSettings();
       this.setStatus(
@@ -419,7 +432,7 @@ export class Aster3DGame {
       );
     });
 
-    this.settingsUi.keyboardInvertVertical.addEventListener("change", () => {
+    this.registerListener(this.settingsUi.keyboardInvertVertical, "change", () => {
       this.controlSettings.keyboardInvertVertical = this.settingsUi.keyboardInvertVertical.checked;
       this.persistControlSettings();
       this.setStatus(
@@ -428,7 +441,7 @@ export class Aster3DGame {
       );
     });
 
-    this.settingsUi.arrowLookSpeed.addEventListener("input", () => {
+    this.registerListener(this.settingsUi.arrowLookSpeed, "input", () => {
       this.controlSettings.arrowLookSpeed = clampNumber(
         Number.parseInt(this.settingsUi.arrowLookSpeed.value, 10),
         0,
@@ -883,7 +896,7 @@ export class Aster3DGame {
 
     this.score += Math.round(asteroid.size * 28);
     this.detachAsteroidFromSector(asteroid);
-    asteroid.mesh.dispose();
+    this.disposeAsteroid(asteroid);
     this.asteroids.splice(index, 1);
     this.spawnExplosion(impactPosition, asteroid.size * 0.9, new Color3(1, 0.68, 0.34));
     this.audio.playExplosion(asteroid.size * 0.24);
@@ -2079,6 +2092,33 @@ export class Aster3DGame {
     this.statusFlash = duration;
   }
 
+  public dispose(): void {
+    if (this.disposed) {
+      return;
+    }
+
+    this.disposed = true;
+    this.keys.clear();
+    this.mouseLookX = 0;
+    this.mouseLookY = 0;
+    this.engine.stopRenderLoop(this.renderLoop);
+
+    for (const cleanup of this.cleanupCallbacks.splice(0)) {
+      cleanup();
+    }
+
+    if (this.hasActivePointerLock()) {
+      document.exitPointerLock();
+    }
+
+    this.clearBullets();
+    this.clearExplosions();
+    this.clearWorld();
+    this.scene.dispose();
+    this.engine.dispose();
+    this.audio.dispose();
+  }
+
   private hasActivePointerLock(): boolean {
     return document.pointerLockElement === this.canvas;
   }
@@ -2166,6 +2206,18 @@ export class Aster3DGame {
 
   private persistControlSettings(): void {
     window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(this.controlSettings));
+  }
+
+  private registerListener(
+    target: EventTarget,
+    type: string,
+    listener: EventListenerOrEventListenerObject,
+    options?: boolean | AddEventListenerOptions,
+  ): void {
+    target.addEventListener(type, listener, options);
+    this.cleanupCallbacks.push(() => {
+      target.removeEventListener(type, listener, options);
+    });
   }
 
   private requireElement<T extends HTMLElement>(root: ParentNode, selector: string): T {

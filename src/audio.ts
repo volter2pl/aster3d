@@ -255,6 +255,48 @@ export class AudioManager {
     }
   }
 
+  public dispose(): void {
+    if (this.boostCleanupTimer !== null) {
+      window.clearTimeout(this.boostCleanupTimer);
+      this.boostCleanupTimer = null;
+    }
+
+    try {
+      this.boostBody?.stop();
+    } catch {
+      // Ignored: oscillator may have already been stopped during cleanup.
+    }
+
+    try {
+      this.boostAir?.stop();
+    } catch {
+      // Ignored: oscillator may have already been stopped during cleanup.
+    }
+
+    this.boostBody?.disconnect();
+    this.boostBodyGain?.disconnect();
+    this.boostAir?.disconnect();
+    this.boostAirGain?.disconnect();
+    this.boostFilter?.disconnect();
+    this.master?.disconnect();
+
+    this.boostFilter = null;
+    this.boostBody = null;
+    this.boostBodyGain = null;
+    this.boostAir = null;
+    this.boostAirGain = null;
+    this.master = null;
+    this.noiseBuffer = null;
+
+    const context = this.context;
+    this.context = null;
+    if (context && context.state !== "closed") {
+      void context.close().catch(() => {
+        // Closing can fail if the browser has already torn the context down.
+      });
+    }
+  }
+
   private ensureContext(): AudioContext {
     if (this.context && this.master && this.noiseBuffer) {
       return this.context;

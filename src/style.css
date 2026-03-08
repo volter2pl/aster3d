@@ -183,6 +183,32 @@ body {
   transform: translateX(-50%);
 }
 
+.boost-veil {
+  position: absolute;
+  inset: -18%;
+  opacity: 0;
+  pointer-events: none;
+  backdrop-filter: blur(0px) saturate(1);
+  -webkit-backdrop-filter: blur(0px) saturate(1);
+  transition:
+    opacity 120ms ease,
+    backdrop-filter 120ms ease,
+    -webkit-backdrop-filter 120ms ease;
+  mask:
+    radial-gradient(circle at center, transparent 18%, rgba(0, 0, 0, 0.18) 30%, rgba(0, 0, 0, 0.68) 58%, rgba(0, 0, 0, 0.98) 100%);
+  -webkit-mask:
+    radial-gradient(circle at center, transparent 18%, rgba(0, 0, 0, 0.18) 30%, rgba(0, 0, 0, 0.68) 58%, rgba(0, 0, 0, 0.98) 100%);
+  background:
+    radial-gradient(
+      circle at center,
+      rgba(155, 230, 255, 0.02) 0%,
+      rgba(155, 230, 255, 0.08) 22%,
+      rgba(109, 214, 255, 0.2) 42%,
+      rgba(92, 188, 255, 0.36) 66%,
+      rgba(75, 149, 255, 0.52) 100%
+    );
+}
+
 .objective-edge {
   position: absolute;
   left: 0;

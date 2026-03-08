@@ -10,6 +10,12 @@ export class AudioManager {
   private context: AudioContext | null = null;
   private master: GainNode | null = null;
   private noiseBuffer: AudioBuffer | null = null;
+  private boostFilter: BiquadFilterNode | null = null;
+  private boostBody: OscillatorNode | null = null;
+  private boostBodyGain: GainNode | null = null;
+  private boostAir: OscillatorNode | null = null;
+  private boostAirGain: GainNode | null = null;
+  private boostCleanupTimer: number | null = null;
 
   public async resume(): Promise<void> {
     const context = this.ensureContext();
@@ -163,6 +169,52 @@ export class AudioManager {
     };
   }
 
+  public setEngine(speedRatio: number, boostRatio: number): void {
+    const context = this.ensureContext();
+    if (context.state !== "running" || !this.master) {
+      return;
+    }
+
+    const now = context.currentTime;
+    const clampedSpeed = clamp(speedRatio, 0, 1);
+    const clampedBoost = clamp(boostRatio, 0, 1);
+    const intensity = Math.max(0, clampedSpeed * 0.85 + clampedBoost * 0.65);
+
+    if (intensity > 0.03) {
+      this.ensureBoostNodes(context);
+      if (!this.boostFilter || !this.boostBody || !this.boostBodyGain || !this.boostAir || !this.boostAirGain) {
+        return;
+      }
+
+      const bodyPitch = 104 + clampedSpeed * 68 + clampedBoost * 92;
+      const airPitch = 190 + clampedSpeed * 120 + clampedBoost * 165;
+      const filterCutoff = 720 + clampedSpeed * 900 + clampedBoost * 1350;
+      const bodyGain = 0.014 + clampedSpeed * 0.028 + clampedBoost * 0.028;
+      const airGain = 0.0015 + clampedSpeed * 0.004 + clampedBoost * 0.012;
+
+      this.boostBody.frequency.cancelScheduledValues(now);
+      this.boostBody.frequency.setTargetAtTime(bodyPitch, now, 0.06);
+      this.boostAir.frequency.cancelScheduledValues(now);
+      this.boostAir.frequency.setTargetAtTime(airPitch, now, 0.06);
+      this.boostFilter.frequency.cancelScheduledValues(now);
+      this.boostFilter.frequency.setTargetAtTime(filterCutoff, now, 0.08);
+
+      this.boostBodyGain.gain.cancelScheduledValues(now);
+      this.boostBodyGain.gain.setTargetAtTime(bodyGain, now, 0.04);
+      this.boostAirGain.gain.cancelScheduledValues(now);
+      this.boostAirGain.gain.setTargetAtTime(airGain, now, 0.05);
+      return;
+    }
+
+    if (this.boostBodyGain && this.boostAirGain) {
+      this.boostBodyGain.gain.cancelScheduledValues(now);
+      this.boostAirGain.gain.cancelScheduledValues(now);
+      this.boostBodyGain.gain.setTargetAtTime(0.0001, now, 0.025);
+      this.boostAirGain.gain.setTargetAtTime(0.0001, now, 0.03);
+      this.scheduleBoostCleanup();
+    }
+  }
+
   private ensureContext(): AudioContext {
     if (this.context && this.master && this.noiseBuffer) {
       return this.context;
@@ -174,6 +226,80 @@ export class AudioManager {
     this.master.connect(this.context.destination);
     this.noiseBuffer = this.createNoiseBuffer(this.context);
     return this.context;
+  }
+
+  private ensureBoostNodes(context: AudioContext): void {
+    if (this.boostFilter && this.boostBody && this.boostBodyGain && this.boostAir && this.boostAirGain) {
+      if (this.boostCleanupTimer !== null) {
+        window.clearTimeout(this.boostCleanupTimer);
+        this.boostCleanupTimer = null;
+      }
+      return;
+    }
+
+    if (this.boostCleanupTimer !== null) {
+      window.clearTimeout(this.boostCleanupTimer);
+      this.boostCleanupTimer = null;
+    }
+
+    const filter = context.createBiquadFilter();
+    filter.type = "lowpass";
+    filter.frequency.value = 850;
+    filter.Q.value = 0.35;
+
+    const body = context.createOscillator();
+    body.type = "triangle";
+    body.frequency.value = 132;
+
+    const bodyGain = context.createGain();
+    bodyGain.gain.value = 0.0001;
+
+    const air = context.createOscillator();
+    air.type = "sine";
+    air.frequency.value = 260;
+
+    const airGain = context.createGain();
+    airGain.gain.value = 0.0001;
+
+    body.connect(bodyGain);
+    bodyGain.connect(filter);
+
+    air.connect(airGain);
+    airGain.connect(filter);
+    filter.connect(this.master!);
+
+    body.start();
+    air.start();
+
+    this.boostFilter = filter;
+    this.boostBody = body;
+    this.boostBodyGain = bodyGain;
+    this.boostAir = air;
+    this.boostAirGain = airGain;
+  }
+
+  private scheduleBoostCleanup(): void {
+    if (this.boostCleanupTimer !== null) {
+      window.clearTimeout(this.boostCleanupTimer);
+    }
+
+    this.boostCleanupTimer = window.setTimeout(() => {
+      this.boostCleanupTimer = null;
+
+      this.boostBody?.stop();
+      this.boostAir?.stop();
+      this.boostBody?.disconnect();
+      this.boostBodyGain?.disconnect();
+      this.boostAir?.disconnect();
+      this.boostAirGain?.disconnect();
+      this.boostFilter?.disconnect();
+
+      this.boostFilter = null;
+      this.boostBody = null;
+      this.boostBodyGain = null;
+      this.boostAir = null;
+      this.boostAirGain = null;
+    }, 140);
   }
 
   private createNoiseBuffer(context: AudioContext): AudioBuffer {

@@ -47,6 +47,7 @@ app.innerHTML = `
         <span></span>
         <span></span>
       </div>
+      <div class="boost-veil" data-boost-veil></div>
       <div class="objective-edge hidden" data-objective-edge>
         <span class="objective-edge__arrow">▲</span>
         <span class="objective-edge__label">SALVAGE</span>

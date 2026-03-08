@@ -43,6 +43,7 @@ type HudRefs = {
   boost: HTMLElement;
   speed: HTMLElement;
   objectiveDistance: HTMLElement;
+  boostVeil: HTMLElement;
   objectiveEdge: HTMLElement;
   objectiveEdgeArrow: HTMLElement;
   status: HTMLElement;
@@ -89,8 +90,8 @@ const COLLECTIBLE_PICKUP_RADIUS = 7;
 const OBJECTIVE_MIN_DISTANCE = 520;
 const OBJECTIVE_MAX_DISTANCE = 760;
 const BOOST_MAX = 100;
-const BOOST_DRAIN_PER_SECOND = 38;
-const BOOST_REGEN_PER_SECOND = 22;
+const BOOST_DRAIN_PER_SECOND = 58;
+const BOOST_REGEN_PER_SECOND = 18;
 
 export class Aster3DGame {
   private readonly canvas: HTMLCanvasElement;
@@ -122,6 +123,8 @@ export class Aster3DGame {
   private worldSeed = Math.random();
   private collectedSalvage = 0;
   private boostCharge = BOOST_MAX;
+  private boostVisual = 0;
+  private boostHoldTime = 0;
 
   private readonly shipVelocity = new Vector3(0, 0, 0);
   private readonly controlSettings: ControlSettings;
@@ -137,6 +140,7 @@ export class Aster3DGame {
       boost: this.requireElement(root, "[data-boost]"),
       speed: this.requireElement(root, "[data-speed]"),
       objectiveDistance: this.requireElement(root, "[data-objective-distance]"),
+      boostVeil: this.requireElement(root, "[data-boost-veil]"),
       objectiveEdge: this.requireElement(root, "[data-objective-edge]"),
       objectiveEdgeArrow: this.requireElement(root, ".objective-edge__arrow"),
       status: this.requireElement(root, "[data-status]"),
@@ -336,19 +340,23 @@ export class Aster3DGame {
 
     const forward = this.camera.getDirection(Vector3.Forward(this.scene.useRightHandedSystem)).normalize();
     const thrustInput = boostActive && throttleInput <= 0 ? 1 : throttleInput;
-    const thrust = boostActive ? 76 : 42;
+    const thrust = boostActive ? 118 : 42;
     if (thrustInput !== 0) {
       this.shipVelocity.addInPlace(forward.scale(thrustInput * thrust * dt));
     }
 
     if (boostActive) {
       this.boostCharge = Math.max(0, this.boostCharge - BOOST_DRAIN_PER_SECOND * dt);
+      this.boostHoldTime = Math.min(1.8, this.boostHoldTime + dt);
     } else {
       this.boostCharge = Math.min(BOOST_MAX, this.boostCharge + BOOST_REGEN_PER_SECOND * dt);
+      this.boostHoldTime = Math.max(0, this.boostHoldTime - dt * 2.2);
     }
+    this.boostVisual += ((boostActive ? 1 : 0) - this.boostVisual) * (1 - Math.exp(-10 * dt));
 
     this.shipVelocity.scaleInPlace(Math.exp(-0.55 * dt));
     this.shipRoot.position.addInPlace(this.shipVelocity.scale(dt));
+    this.audio.setEngine(this.shipVelocity.length() / 160, this.boostHoldTime / 1.8);
 
     if (fireRequested && this.fireCooldown === 0) {
       this.fireBullet(forward);
@@ -717,6 +725,9 @@ export class Aster3DGame {
     this.shipRoot.rotationQuaternion = Quaternion.Identity();
     this.shield = 100;
     this.boostCharge = BOOST_MAX;
+    this.boostVisual = 0;
+    this.boostHoldTime = 0;
+    this.audio.setEngine(0, 0);
     this.invulnerability = 2.2;
     this.fireCooldown = 0;
   }
@@ -939,6 +950,11 @@ export class Aster3DGame {
     this.hud.shield.textContent = `${Math.round(this.shield)}%`;
     this.hud.boost.textContent = `${Math.round(this.boostCharge)}%`;
     this.hud.speed.textContent = Math.round(this.shipVelocity.length()).toString();
+    this.hud.boostVeil.style.opacity = `${this.boostVisual}`;
+    const blur = this.boostVisual * 24;
+    const saturate = 1 + this.boostVisual * 0.55;
+    this.hud.boostVeil.style.backdropFilter = `blur(${blur}px) saturate(${saturate})`;
+    this.hud.boostVeil.style.setProperty("-webkit-backdrop-filter", `blur(${blur}px) saturate(${saturate})`);
     this.updateObjectiveHud();
 
     if (this.statusFlash === 0 && !this.gameOver && document.pointerLockElement === this.canvas) {

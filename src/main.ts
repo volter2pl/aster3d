@@ -1,4 +1,14 @@
 import "./style.css";
+import { Engine } from "@babylonjs/core/Engines/engine";
+import "@babylonjs/core/Shaders/default.vertex";
+import "@babylonjs/core/Shaders/default.fragment";
+import "@babylonjs/core/Shaders/kernelBlur.vertex";
+import "@babylonjs/core/Shaders/kernelBlur.fragment";
+import "@babylonjs/core/Shaders/glowMapMerge.vertex";
+import "@babylonjs/core/Shaders/glowMapMerge.fragment";
+import "@babylonjs/core/Shaders/glowBlurPostProcess.fragment";
+import "@babylonjs/core/Shaders/glowMapGeneration.vertex";
+import "@babylonjs/core/Shaders/glowMapGeneration.fragment";
 import { Aster3DGame } from "./game";
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -146,12 +156,44 @@ app.innerHTML = `
   </div>
 `;
 
-const game = new Aster3DGame(app);
+function renderStartupError(root: HTMLDivElement, title: string, message: string): void {
+  root.innerHTML = `
+    <div class="shell">
+      <div class="overlay">
+        <div class="overlay__card">
+          <p class="overlay__eyebrow">Renderer unavailable</p>
+          <h1>${title}</h1>
+          <p>${message}</p>
+          <p>Enable hardware acceleration or try a browser with WebGL support.</p>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+let game: Aster3DGame | null = null;
+
+if (!Engine.IsSupported) {
+  renderStartupError(
+    app,
+    "WebGL is not available",
+    "Aster3D could not create a WebGL context, so the 3D scene cannot start.",
+  );
+} else {
+  try {
+    game = new Aster3DGame(app);
+  } catch (error) {
+    console.error("Failed to start Aster3D", error);
+    const message =
+      error instanceof Error ? error.message : "The renderer failed during startup for an unknown reason.";
+    renderStartupError(app, "3D renderer failed to start", message);
+  }
+}
 
 if (import.meta.hot) {
   import.meta.hot.accept();
   import.meta.hot.dispose(() => {
-    game.dispose();
+    game?.dispose();
     app.innerHTML = "";
   });
 }

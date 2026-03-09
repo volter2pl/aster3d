@@ -28,7 +28,7 @@ The base is also your safe point: you can dock there to repair shields before he
 | Mouse | look around / aim |
 | Arrow keys | pitch / yaw |
 | W / S | forward thrust / braking |
-| A / D | yaw |
+| A / D | strafe left / right |
 | Shift | boost |
 | Space | shoot |
 | R | restart after game over |

@@ -2,6 +2,7 @@ import { UniversalCamera } from "@babylonjs/core/Cameras/universalCamera";
 import { Color3, Color4 } from "@babylonjs/core/Maths/math.color";
 import { Quaternion, Vector3 } from "@babylonjs/core/Maths/math.vector";
 import { Engine } from "@babylonjs/core/Engines/engine";
+import { DirectionalLight } from "@babylonjs/core/Lights/directionalLight";
 import { HemisphericLight } from "@babylonjs/core/Lights/hemisphericLight";
 import { GlowLayer } from "@babylonjs/core/Layers/glowLayer";
 import { StandardMaterial } from "@babylonjs/core/Materials/standardMaterial";
@@ -152,6 +153,10 @@ const SHIELD_REPAIR_COST = 2;
 const ARROW_LOOK_SPEED_MIN = 0.6;
 const ARROW_LOOK_SPEED_MAX = 3.4;
 const ARROW_LOOK_SPEED_DEFAULT = 20;
+const STRAFE_THRUST = 30;
+const STRAFE_BOOST_THRUST = 78;
+const SUNLIGHT_DIRECTION = new Vector3(0.78, -0.28, -0.56).normalize();
+const SUN_POSITION = SUNLIGHT_DIRECTION.scale(-460);
 
 export class Aster3DGame {
   private readonly canvas: HTMLCanvasElement;
@@ -267,8 +272,14 @@ export class Aster3DGame {
     this.scene.clearColor = new Color4(0.008, 0.015, 0.04, 1);
 
     const light = new HemisphericLight("keyLight", new Vector3(0.2, 1, -0.3), this.scene);
-    light.intensity = 0.94;
-    light.groundColor = new Color3(0.01, 0.03, 0.07);
+    light.intensity = 0.62;
+    light.diffuse = new Color3(0.54, 0.66, 0.92);
+    light.groundColor = new Color3(0.01, 0.03, 0.08);
+
+    const sunLight = new DirectionalLight("sunLight", SUNLIGHT_DIRECTION, this.scene);
+    sunLight.intensity = 0.88;
+    sunLight.diffuse = new Color3(1, 0.9, 0.72);
+    sunLight.specular = new Color3(1, 0.94, 0.86);
 
     new GlowLayer("sceneGlow", this.scene, { blurKernelSize: 32 }).intensity = 0.65;
 
@@ -367,7 +378,7 @@ export class Aster3DGame {
       if (!this.gameOver && !this.settingsOpen && !this.stationOpen && !this.autoDockActive) {
         this.setStatus(
           this.hasActivePointerLock()
-            ? "Mouse active. Mouse or arrows yaw/pitch, A/D yaw, Q/E roll, Shift boost, Space fire."
+            ? "Mouse active. Mouse or arrows yaw/pitch, A/D strafe, Q/E roll, Shift boost, Space fire."
             : "Paused. Click to resume cockpit controls",
           1.25,
         );
@@ -506,14 +517,14 @@ export class Aster3DGame {
 
   private updateShip(dt: number): void {
     const pointerActive = document.pointerLockElement === this.canvas;
-    const yawInput = (this.keys.has("KeyD") ? 1 : 0) - (this.keys.has("KeyA") ? 1 : 0);
+    const strafeInput = (this.keys.has("KeyD") ? 1 : 0) - (this.keys.has("KeyA") ? 1 : 0);
     const rollInput = (this.keys.has("KeyE") ? 1 : 0) - (this.keys.has("KeyQ") ? 1 : 0);
     const throttleInput = (this.keys.has("KeyW") ? 1 : 0) - (this.keys.has("KeyS") ? 1 : 0) * 0.6;
     const boostRequested = this.keys.has("ShiftLeft") || this.keys.has("ShiftRight");
     const boostActive = boostRequested && this.boostCharge > 0;
     const fireRequested = this.keys.has("Space");
 
-    let yawDelta = yawInput * dt * 1.7;
+    let yawDelta = 0;
     let pitchDelta = 0;
     let rollDelta = rollInput * dt * 1.95;
     const mouseHorizontalSign = this.controlSettings.mouseInvertHorizontal ? 1 : -1;
@@ -540,10 +551,16 @@ export class Aster3DGame {
     this.shipRoot.rotationQuaternion = orientation.multiply(localDelta).normalize();
 
     const forward = this.camera.getDirection(Vector3.Forward(this.scene.useRightHandedSystem)).normalize();
+    const right = this.camera.getDirection(Vector3.Right()).normalize();
     const thrustInput = boostActive && throttleInput <= 0 ? 1 : throttleInput;
     const thrust = boostActive ? 118 : 42;
+    const lateralThrust = boostActive ? STRAFE_BOOST_THRUST : STRAFE_THRUST;
+    const lateralInput = strafeInput * keyboardHorizontalSign;
     if (thrustInput !== 0) {
       this.shipVelocity.addInPlace(forward.scale(thrustInput * thrust * dt));
+    }
+    if (lateralInput !== 0) {
+      this.shipVelocity.addInPlace(right.scale(lateralInput * lateralThrust * dt));
     }
 
     if (boostActive) {
@@ -1955,6 +1972,26 @@ export class Aster3DGame {
       star.parent = this.starfieldRoot;
       star.position.copyFrom(randomUnitVector().scale(randomBetween(180, 520)));
     }
+
+    const sunCore = MeshBuilder.CreateSphere("sun-core", { diameter: 24, segments: 18 }, this.scene);
+    const sunCoreMaterial = new StandardMaterial("sun-core-mat", this.scene);
+    sunCoreMaterial.disableLighting = true;
+    sunCoreMaterial.emissiveColor = new Color3(1, 0.8, 0.5);
+    sunCoreMaterial.diffuseColor = new Color3(1, 0.86, 0.68);
+    sunCore.material = sunCoreMaterial;
+    sunCore.parent = this.starfieldRoot;
+    sunCore.position.copyFrom(SUN_POSITION);
+
+    const sunHalo = MeshBuilder.CreateSphere("sun-halo", { diameter: 44, segments: 18 }, this.scene);
+    const sunHaloMaterial = new StandardMaterial("sun-halo-mat", this.scene);
+    sunHaloMaterial.disableLighting = true;
+    sunHaloMaterial.emissiveColor = new Color3(0.7, 0.86, 1);
+    sunHaloMaterial.diffuseColor = new Color3(0.58, 0.74, 0.96);
+    sunHaloMaterial.alpha = 0.16;
+    sunHaloMaterial.backFaceCulling = false;
+    sunHalo.material = sunHaloMaterial;
+    sunHalo.parent = this.starfieldRoot;
+    sunHalo.position.copyFrom(SUN_POSITION);
   }
 
   private updateHud(): void {
@@ -1980,7 +2017,7 @@ export class Aster3DGame {
       this.hud.status.textContent =
         dockingPrompt ??
         (this.hasActivePointerLock()
-          ? "Mouse yaw/pitch  A/D yaw  Q/E roll  Shift boost  Space fire"
+          ? "Mouse yaw/pitch  A/D strafe  Q/E roll  Shift boost  Space fire"
           : "Paused. Click to resume cockpit controls");
     }
   }

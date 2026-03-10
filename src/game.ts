@@ -1,21 +1,18 @@
 import { UniversalCamera } from "@babylonjs/core/Cameras/universalCamera";
-import { AssetContainer } from "@babylonjs/core/assetContainer";
 import { Color3, Color4 } from "@babylonjs/core/Maths/math.color";
 import { Quaternion, Vector3 } from "@babylonjs/core/Maths/math.vector";
 import { Engine } from "@babylonjs/core/Engines/engine";
-import { LoadAssetContainerAsync } from "@babylonjs/core/Loading/sceneLoader";
 import { DirectionalLight } from "@babylonjs/core/Lights/directionalLight";
 import { HemisphericLight } from "@babylonjs/core/Lights/hemisphericLight";
 import { GlowLayer } from "@babylonjs/core/Layers/glowLayer";
 import { StandardMaterial } from "@babylonjs/core/Materials/standardMaterial";
-import { Texture } from "@babylonjs/core/Materials/Textures/texture";
 import { Mesh } from "@babylonjs/core/Meshes/mesh";
 import { MeshBuilder } from "@babylonjs/core/Meshes/meshBuilder";
 import { TransformNode } from "@babylonjs/core/Meshes/transformNode";
 import { Scene } from "@babylonjs/core/scene";
 import { AudioManager } from "./audio";
-import spacecraftUrl from "../spacecraft.glb?url";
-import "@babylonjs/loaders/glTF";
+import { EnemyEngineGlow, createEnemyPresentation, updateEnemyEngineGlows } from "./enemyPresentation";
+import { LoadedSpacecraftAsset, loadSpacecraftAsset } from "./spacecraftAsset";
 
 type Asteroid = {
   mesh: Mesh;
@@ -113,14 +110,6 @@ type Collectible = {
 
 type EnemyState = "pursuit" | "attack" | "recover";
 
-type EnemyEngineGlow = {
-  mesh: Mesh;
-  material: StandardMaterial;
-  phase: number;
-  baseScale: number;
-  throttleResponse: number;
-};
-
 type Enemy = {
   root: TransformNode;
   velocity: Vector3;
@@ -156,21 +145,6 @@ const ENEMY_MAX_SPEED = 33;
 const ENEMY_BULLET_SPEED = 92;
 const ENEMY_COLLISION_RADIUS = 2.8;
 const ENEMY_VIEW_DISTANCE = WORLD_SECTOR_SIZE * (WORLD_UNLOAD_RADIUS + 1.2);
-// Tune these local-space offsets against `spacecraft.glb` without touching enemy AI/navigation.
-const ENEMY_MODEL_SCALE = 4.1;
-const ENEMY_MODEL_ROTATION = Vector3.Zero();
-const ENEMY_WEAPON_MOUNT_OFFSETS = [
-  new Vector3(-0.82, -0.1, 1.82),
-  new Vector3(0.82, -0.1, 1.82),
-];
-const ENEMY_FRONT_ENGINE_LIGHT_OFFSETS = [
-  new Vector3(-0.56, -0.02, 1.36),
-  new Vector3(0.56, -0.02, 1.36),
-];
-const ENEMY_REAR_ENGINE_LIGHT_OFFSETS = [
-  new Vector3(-0.78, -0.04, -1.96),
-  new Vector3(0.78, -0.04, -1.96),
-];
 const ASTEROID_SALVAGE_DROP_CHANCE = 0.2;
 const ENEMY_SALVAGE_DROP_CHANCE = 0.4;
 const BASE_POSITION = new Vector3(-180, 24, -340);
@@ -254,9 +228,7 @@ export class Aster3DGame {
   };
   private baseShieldMaterial: StandardMaterial | null = null;
   private objectiveDirection = new Vector3(0.24, 0.08, 0.97).normalize();
-  private enemyModelPrefab: AssetContainer | null = null;
-  private enemyImportedMaterial: StandardMaterial | null = null;
-  private enemyImportedTextureUrl: string | null = null;
+  private enemyModelAsset: LoadedSpacecraftAsset | null = null;
 
   public static async create(root: HTMLElement): Promise<Aster3DGame> {
     const game = new Aster3DGame(root);
@@ -829,13 +801,7 @@ export class Aster3DGame {
           : enemy.state === "attack"
             ? 0.72
             : 0.84;
-      const glowPulseTime = performance.now() * 0.01;
-      for (const glow of enemy.engineGlows) {
-        const pulse = 0.9 + Math.sin(glowPulseTime + glow.phase) * 0.14;
-        const throttleScale = 1 + engineThrottle * glow.throttleResponse;
-        glow.mesh.scaling.setAll(glow.baseScale * throttleScale * pulse);
-        glow.material.alpha = 0.72 + engineThrottle * 0.18;
-      }
+      updateEnemyEngineGlows(enemy.engineGlows, engineThrottle, performance.now());
 
       const collisionRadius = enemy.radius + SHIP_COLLISION_RADIUS;
       if (
@@ -1007,336 +973,12 @@ export class Aster3DGame {
 
   private async loadEnemyModelPrefab(): Promise<void> {
     try {
-      const response = await fetch(spacecraftUrl);
-      if (!response.ok) {
-        throw new Error(`Failed to fetch enemy model: ${response.status} ${response.statusText}`);
-      }
-
-      const modelData = new Uint8Array(await response.arrayBuffer());
-      this.enemyModelPrefab = await LoadAssetContainerAsync(modelData, this.scene, {
-        name: "spacecraft.glb",
-        pluginExtension: ".glb",
-        pluginOptions: {
-          gltf: {
-            // Keep the GLB geometry/UVs, but rebuild a stable Babylon material from its embedded base-color texture.
-            skipMaterials: true,
-          },
-        },
-      });
-      this.enemyModelPrefab.removeAllFromScene();
-      this.enemyImportedMaterial = this.createEnemyImportedMaterial(modelData);
+      this.enemyModelAsset?.dispose();
+      this.enemyModelAsset = await loadSpacecraftAsset(this.scene);
     } catch (error) {
       console.warn("Failed to load enemy spacecraft model, using procedural fallback.", error);
-      this.enemyModelPrefab = null;
-      this.disposeEnemyImportedMaterial();
+      this.enemyModelAsset = null;
     }
-  }
-
-  private createProceduralEnemyVisual(root: TransformNode): StandardMaterial[] {
-    const hullMaterial = new StandardMaterial(`enemy-hull-${performance.now()}`, this.scene);
-    hullMaterial.diffuseColor = new Color3(0.2, 0.23, 0.3);
-    hullMaterial.emissiveColor = new Color3(0.04, 0.05, 0.08);
-    hullMaterial.specularColor = new Color3(0.08, 0.08, 0.08);
-
-    const accentMaterial = new StandardMaterial(`enemy-accent-${performance.now()}`, this.scene);
-    accentMaterial.disableLighting = true;
-    accentMaterial.emissiveColor = new Color3(1, 0.16, 0.12);
-    accentMaterial.diffuseColor = new Color3(0.95, 0.22, 0.18);
-
-    const engineMaterial = new StandardMaterial(`enemy-engine-${performance.now()}`, this.scene);
-    engineMaterial.disableLighting = true;
-    engineMaterial.emissiveColor = new Color3(0.26, 0.88, 1);
-    engineMaterial.diffuseColor = new Color3(0.16, 0.56, 0.88);
-
-    const hull = MeshBuilder.CreateBox(
-      `enemy-hull-${performance.now()}`,
-      { width: 1.35, height: 0.72, depth: 2.9 },
-      this.scene,
-    );
-    hull.parent = root;
-    hull.position.z = 0.08;
-    hull.material = hullMaterial;
-
-    const canopy = MeshBuilder.CreateBox(
-      `enemy-canopy-${performance.now()}`,
-      { width: 0.76, height: 0.24, depth: 0.78 },
-      this.scene,
-    );
-    canopy.parent = root;
-    canopy.position.set(0, 0.34, 0.86);
-    canopy.material = accentMaterial;
-
-    const nose = MeshBuilder.CreateCylinder(
-      `enemy-nose-${performance.now()}`,
-      { height: 1.28, diameterTop: 0.12, diameterBottom: 0.72, tessellation: 4 },
-      this.scene,
-    );
-    nose.parent = root;
-    nose.rotation.x = Math.PI * 0.5;
-    nose.position.set(0, 0.02, 2.02);
-    nose.material = accentMaterial;
-
-    const leftWing = MeshBuilder.CreateBox(
-      `enemy-wing-l-${performance.now()}`,
-      { width: 1.9, height: 0.12, depth: 0.9 },
-      this.scene,
-    );
-    leftWing.parent = root;
-    leftWing.position.set(-1.55, -0.02, -0.2);
-    leftWing.rotation.z = 0.1;
-    leftWing.material = hullMaterial;
-
-    const rightWing = MeshBuilder.CreateBox(
-      `enemy-wing-r-${performance.now()}`,
-      { width: 1.9, height: 0.12, depth: 0.9 },
-      this.scene,
-    );
-    rightWing.parent = root;
-    rightWing.position.set(1.55, -0.02, -0.2);
-    rightWing.rotation.z = -0.1;
-    rightWing.material = hullMaterial;
-
-    const leftPylon = MeshBuilder.CreateBox(
-      `enemy-pylon-l-${performance.now()}`,
-      { width: 0.28, height: 0.3, depth: 2.1 },
-      this.scene,
-    );
-    leftPylon.parent = root;
-    leftPylon.position.set(-1.02, 0, 0.08);
-    leftPylon.material = hullMaterial;
-
-    const rightPylon = MeshBuilder.CreateBox(
-      `enemy-pylon-r-${performance.now()}`,
-      { width: 0.28, height: 0.3, depth: 2.1 },
-      this.scene,
-    );
-    rightPylon.parent = root;
-    rightPylon.position.set(1.02, 0, 0.08);
-    rightPylon.material = hullMaterial;
-
-    const dorsalFin = MeshBuilder.CreateBox(
-      `enemy-fin-${performance.now()}`,
-      { width: 0.18, height: 0.78, depth: 1.1 },
-      this.scene,
-    );
-    dorsalFin.parent = root;
-    dorsalFin.position.set(0, 0.54, -0.92);
-    dorsalFin.material = hullMaterial;
-
-    const gunLeft = MeshBuilder.CreateCylinder(
-      `enemy-gun-l-${performance.now()}`,
-      { height: 1.05, diameter: 0.16, tessellation: 6 },
-      this.scene,
-    );
-    gunLeft.parent = root;
-    gunLeft.rotation.x = Math.PI * 0.5;
-    gunLeft.position.set(-0.86, -0.12, 1.58);
-    gunLeft.material = accentMaterial;
-
-    const gunRight = MeshBuilder.CreateCylinder(
-      `enemy-gun-r-${performance.now()}`,
-      { height: 1.05, diameter: 0.16, tessellation: 6 },
-      this.scene,
-    );
-    gunRight.parent = root;
-    gunRight.rotation.x = Math.PI * 0.5;
-    gunRight.position.set(0.86, -0.12, 1.58);
-    gunRight.material = accentMaterial;
-
-    const engineLeft = MeshBuilder.CreateCylinder(
-      `enemy-engine-l-${performance.now()}`,
-      { height: 0.82, diameter: 0.52, tessellation: 8 },
-      this.scene,
-    );
-    engineLeft.parent = root;
-    engineLeft.rotation.x = Math.PI * 0.5;
-    engineLeft.position.set(-0.84, -0.02, -1.88);
-    engineLeft.material = engineMaterial;
-
-    const engineRight = MeshBuilder.CreateCylinder(
-      `enemy-engine-r-${performance.now()}`,
-      { height: 0.82, diameter: 0.52, tessellation: 8 },
-      this.scene,
-    );
-    engineRight.parent = root;
-    engineRight.rotation.x = Math.PI * 0.5;
-    engineRight.position.set(0.84, -0.02, -1.88);
-    engineRight.material = engineMaterial;
-
-    return [hullMaterial, accentMaterial, engineMaterial];
-  }
-
-  private createEnemyWeaponMounts(root: TransformNode): TransformNode[] {
-    return ENEMY_WEAPON_MOUNT_OFFSETS.map((offset, index) => {
-      const mount = new TransformNode(`enemy-weapon-mount-${index}-${performance.now()}`, this.scene);
-      mount.parent = root;
-      mount.position.copyFrom(offset);
-      return mount;
-    });
-  }
-
-  private createEnemyEngineGlows(root: TransformNode): EnemyEngineGlow[] {
-    const frontColor = new Color3(0.32, 0.88, 1);
-    const rearColor = new Color3(1, 0.5, 0.16);
-    const glows: EnemyEngineGlow[] = [];
-
-    for (const [index, offset] of ENEMY_FRONT_ENGINE_LIGHT_OFFSETS.entries()) {
-      glows.push(
-        this.createEnemyEngineGlow(
-          root,
-          `enemy-engine-front-${index}-${performance.now()}`,
-          offset,
-          frontColor,
-          0.2,
-          index * 0.7,
-          0.22,
-        ),
-      );
-    }
-
-    for (const [index, offset] of ENEMY_REAR_ENGINE_LIGHT_OFFSETS.entries()) {
-      glows.push(
-        this.createEnemyEngineGlow(
-          root,
-          `enemy-engine-rear-${index}-${performance.now()}`,
-          offset,
-          rearColor,
-          0.32,
-          1.4 + index * 0.7,
-          0.46,
-        ),
-      );
-    }
-
-    return glows;
-  }
-
-  private createEnemyEngineGlow(
-    root: TransformNode,
-    name: string,
-    position: Vector3,
-    color: Color3,
-    diameter: number,
-    phase: number,
-    throttleResponse: number,
-  ): EnemyEngineGlow {
-    const material = new StandardMaterial(`${name}-mat`, this.scene);
-    material.disableLighting = true;
-    material.emissiveColor = color;
-    material.diffuseColor = color.scale(0.45);
-    material.alpha = 0.9;
-
-    const mesh = MeshBuilder.CreateSphere(name, { diameter, segments: 8 }, this.scene);
-    mesh.parent = root;
-    mesh.position.copyFrom(position);
-    mesh.material = material;
-    mesh.isPickable = false;
-
-    return {
-      mesh,
-      material,
-      phase,
-      baseScale: 1,
-      throttleResponse,
-    };
-  }
-
-  private createEnemyImportedMaterial(modelData: Uint8Array): StandardMaterial {
-    const image = this.extractEmbeddedTextureFromGlb(modelData);
-    this.disposeEnemyImportedMaterial();
-
-    const material = new StandardMaterial(`enemy-imported-material-${performance.now()}`, this.scene);
-    material.diffuseColor = Color3.White();
-    material.emissiveColor = new Color3(0.1, 0.12, 0.16);
-    material.specularColor = new Color3(0.08, 0.08, 0.08);
-    material.specularPower = 32;
-    material.backFaceCulling = false;
-
-    if (image) {
-      const textureUrl = URL.createObjectURL(image.blob);
-      this.enemyImportedTextureUrl = textureUrl;
-      const texture = new Texture(textureUrl, this.scene, {
-        invertY: false,
-        samplingMode: Texture.TRILINEAR_SAMPLINGMODE,
-      });
-      material.diffuseTexture = texture;
-    }
-
-    return material;
-  }
-
-  private disposeEnemyImportedMaterial(): void {
-    this.enemyImportedMaterial?.dispose();
-    this.enemyImportedMaterial = null;
-    if (this.enemyImportedTextureUrl) {
-      URL.revokeObjectURL(this.enemyImportedTextureUrl);
-      this.enemyImportedTextureUrl = null;
-    }
-  }
-
-  private extractEmbeddedTextureFromGlb(modelData: Uint8Array): { blob: Blob; mimeType: string } | null {
-    const view = new DataView(modelData.buffer, modelData.byteOffset, modelData.byteLength);
-    if (modelData.byteLength < 20) {
-      return null;
-    }
-
-    const magic = new TextDecoder().decode(modelData.subarray(0, 4));
-    if (magic !== "glTF") {
-      return null;
-    }
-
-    let offset = 12;
-    let json: {
-      images?: Array<{
-        bufferView?: number;
-        mimeType?: string;
-      }>;
-      bufferViews?: Array<{
-        byteOffset?: number;
-        byteLength: number;
-      }>;
-    } | null = null;
-    let binaryChunkOffset = 0;
-
-    while (offset + 8 <= modelData.byteLength) {
-      const chunkLength = view.getUint32(offset, true);
-      const chunkType = view.getUint32(offset + 4, true);
-      const chunkDataOffset = offset + 8;
-
-      if (chunkDataOffset + chunkLength > modelData.byteLength) {
-        return null;
-      }
-
-      if (chunkType === 0x4e4f534a) {
-        const jsonText = new TextDecoder().decode(modelData.subarray(chunkDataOffset, chunkDataOffset + chunkLength));
-        json = JSON.parse(jsonText);
-      } else if (chunkType === 0x004e4942) {
-        binaryChunkOffset = chunkDataOffset;
-      }
-
-      offset = chunkDataOffset + chunkLength;
-    }
-
-    const image = json?.images?.[0];
-    if (!image || image.bufferView === undefined || !image.mimeType) {
-      return null;
-    }
-
-    const bufferView = json?.bufferViews?.[image.bufferView];
-    if (!bufferView) {
-      return null;
-    }
-
-    const byteOffset = binaryChunkOffset + (bufferView.byteOffset ?? 0);
-    const byteLength = bufferView.byteLength;
-    if (byteOffset + byteLength > modelData.byteLength) {
-      return null;
-    }
-
-    return {
-      blob: new Blob([modelData.slice(byteOffset, byteOffset + byteLength)], { type: image.mimeType }),
-      mimeType: image.mimeType,
-    };
   }
 
   private damageEnemy(index: number, impulse: Vector3, collisionKill = false): void {
@@ -1564,44 +1206,7 @@ export class Aster3DGame {
     root.rotationQuaternion = this.scene.useRightHandedSystem
       ? Quaternion.FromLookDirectionRH(initialDirection, Vector3.Up())
       : Quaternion.FromLookDirectionLH(initialDirection, Vector3.Up());
-    const disposeCustomCallbacks: Array<() => void> = [];
-    const visualRoot = new TransformNode(`enemy-visual-${performance.now()}`, this.scene);
-    visualRoot.parent = root;
-    visualRoot.rotation.copyFrom(ENEMY_MODEL_ROTATION);
-    visualRoot.scaling.setAll(ENEMY_MODEL_SCALE);
-
-    if (this.enemyModelPrefab) {
-      const instance = this.enemyModelPrefab.instantiateModelsToScene(
-        (sourceName) => `${sourceName}-${performance.now()}`,
-        false,
-        { doNotInstantiate: true },
-      );
-
-      for (const node of instance.rootNodes) {
-        node.parent = visualRoot;
-      }
-
-      if (this.enemyImportedMaterial) {
-        for (const mesh of visualRoot.getChildMeshes()) {
-          mesh.material = this.enemyImportedMaterial;
-        }
-      }
-    } else {
-      const fallbackMaterials = this.createProceduralEnemyVisual(visualRoot);
-      disposeCustomCallbacks.push(() => {
-        for (const material of fallbackMaterials) {
-          material.dispose();
-        }
-      });
-    }
-
-    const weaponMounts = this.createEnemyWeaponMounts(root);
-    const engineGlows = this.createEnemyEngineGlows(root);
-    disposeCustomCallbacks.push(() => {
-      for (const glow of engineGlows) {
-        glow.material.dispose();
-      }
-    });
+    const presentation = createEnemyPresentation(this.scene, root, this.enemyModelAsset);
 
     const enemy: Enemy = {
       root,
@@ -1613,14 +1218,10 @@ export class Aster3DGame {
       strafeSign: rng() > 0.5 ? 1 : -1,
       state: "pursuit",
       sectorKey: sectorKeyValue,
-      weaponMounts,
+      weaponMounts: presentation.weaponMounts,
       nextWeaponMountIndex: 0,
-      engineGlows,
-      disposeCustom: () => {
-        for (const disposeCustom of disposeCustomCallbacks) {
-          disposeCustom();
-        }
-      },
+      engineGlows: presentation.engineGlows,
+      disposeCustom: presentation.dispose,
     };
 
     this.enemies.push(enemy);
@@ -2451,9 +2052,8 @@ export class Aster3DGame {
     this.clearBullets();
     this.clearExplosions();
     this.clearWorld();
-    this.enemyModelPrefab?.dispose();
-    this.enemyModelPrefab = null;
-    this.disposeEnemyImportedMaterial();
+    this.enemyModelAsset?.dispose();
+    this.enemyModelAsset = null;
     this.scene.dispose();
     this.engine.dispose();
     this.audio.dispose();

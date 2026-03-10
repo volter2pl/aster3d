@@ -1,7 +1,7 @@
 import { Vector3 } from "@babylonjs/core/Maths/math.vector";
 
 // Fallback offsets for `src/assets/models/spacecraft.glb` when helper nodes are missing.
-export const ENEMY_MODEL_SCALE = 4.1;
+export const ENEMY_MODEL_SCALE = 7.8;
 export const ENEMY_MODEL_ROTATION = Vector3.Zero();
 export const ENEMY_WEAPON_MOUNT_OFFSETS = [
   new Vector3(-0.82, -0.1, -1.82),

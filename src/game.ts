@@ -154,10 +154,11 @@ const BOOST_REGEN_PER_SECOND = 18;
 const ENEMY_ATTACK_RANGE = 165;
 const ENEMY_MAX_SPEED = 33;
 const ENEMY_BULLET_SPEED = 92;
-const ENEMY_COLLISION_RADIUS = 2.8;
+const ENEMY_COLLISION_RADIUS = 5;
 const ENEMY_VIEW_DISTANCE = WORLD_SECTOR_SIZE * (WORLD_UNLOAD_RADIUS + 1.2);
 const ASTEROID_SALVAGE_DROP_CHANCE = 0.2;
 const ENEMY_SALVAGE_DROP_CHANCE = 0.4;
+const ASTEROID_HIT_IMPULSE = 2.2;
 const ASTEROID_LARGE_CHANCE = 0.15;
 const ASTEROID_HUGE_CHANCE = 0.05;
 const ASTEROID_BASE_SIZE_MIN = 2.1;
@@ -815,6 +816,8 @@ export class Aster3DGame {
         this.triggerBaseShieldFlash(enemy.root.position);
       }
 
+      this.syncEnemySectorMembership(enemy);
+
       const toShipAfterMove = this.shipRoot.position.subtract(enemy.root.position);
       const distanceAfterMove = Math.max(0.001, toShipAfterMove.length());
       const attackDirection = toShipAfterMove.scale(1 / distanceAfterMove);
@@ -860,6 +863,8 @@ export class Aster3DGame {
       asteroid.mesh.rotation.x += asteroid.spin.x * dt;
       asteroid.mesh.rotation.y += asteroid.spin.y * dt;
       asteroid.mesh.rotation.z += asteroid.spin.z * dt;
+
+      this.syncAsteroidSectorMembership(asteroid);
 
       if (
         asteroid.sectorKey === null &&
@@ -971,7 +976,7 @@ export class Aster3DGame {
   private damageAsteroid(index: number, damage: number, impulse: Vector3): void {
     const asteroid = this.asteroids[index];
     asteroid.durability -= damage;
-    asteroid.velocity.addInPlace(impulse.normalize().scale(3.8));
+    asteroid.velocity.addInPlace(impulse.normalize().scale(ASTEROID_HIT_IMPULSE));
 
     this.spawnExplosion(asteroid.mesh.position, asteroid.size * 0.45, new Color3(0.58, 0.94, 1));
 
@@ -1399,6 +1404,25 @@ export class Aster3DGame {
     sector.asteroids = sector.asteroids.filter((candidate) => candidate !== asteroid);
   }
 
+  private syncAsteroidSectorMembership(asteroid: Asteroid): void {
+    const nextSectorKey = getSectorKeyForPosition(asteroid.mesh.position);
+    if (nextSectorKey === asteroid.sectorKey) {
+      return;
+    }
+
+    this.detachAsteroidFromSector(asteroid);
+    const nextSector = this.loadedSectors.get(nextSectorKey);
+    if (!nextSector) {
+      asteroid.sectorKey = null;
+      return;
+    }
+
+    asteroid.sectorKey = nextSectorKey;
+    if (!nextSector.asteroids.includes(asteroid)) {
+      nextSector.asteroids.push(asteroid);
+    }
+  }
+
   private disposeEnemy(enemy: Enemy): void {
     for (const mesh of enemy.root.getChildMeshes()) {
       mesh.dispose();
@@ -1418,6 +1442,25 @@ export class Aster3DGame {
     }
 
     sector.enemies = sector.enemies.filter((candidate) => candidate !== enemy);
+  }
+
+  private syncEnemySectorMembership(enemy: Enemy): void {
+    const nextSectorKey = getSectorKeyForPosition(enemy.root.position);
+    if (nextSectorKey === enemy.sectorKey) {
+      return;
+    }
+
+    this.detachEnemyFromSector(enemy);
+    const nextSector = this.loadedSectors.get(nextSectorKey);
+    if (!nextSector) {
+      enemy.sectorKey = null;
+      return;
+    }
+
+    enemy.sectorKey = nextSectorKey;
+    if (!nextSector.enemies.includes(enemy)) {
+      nextSector.enemies.push(enemy);
+    }
   }
 
   private updateObjective(dt: number): void {
@@ -2267,6 +2310,14 @@ function randomUnitVector(): Vector3 {
 
 function sectorKey(x: number, y: number, z: number): string {
   return `${x}:${y}:${z}`;
+}
+
+function getSectorKeyForPosition(position: Vector3): string {
+  return sectorKey(
+    Math.floor(position.x / WORLD_SECTOR_SIZE),
+    Math.floor(position.y / WORLD_SECTOR_SIZE),
+    Math.floor(position.z / WORLD_SECTOR_SIZE),
+  );
 }
 
 function reflectVector(vector: Vector3, normal: Vector3): Vector3 {

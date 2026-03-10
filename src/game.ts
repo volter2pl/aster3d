@@ -60,6 +60,7 @@ type HudRefs = {
   objectiveEdgeArrow: HTMLElement;
   baseEdge: HTMLElement;
   baseEdgeArrow: HTMLElement;
+  fpsMeter: HTMLElement;
   status: HTMLElement;
   overlay: HTMLElement;
   finalScore: HTMLElement;
@@ -75,6 +76,7 @@ type SettingsRefs = {
   keyboardInvertVertical: HTMLInputElement;
   arrowLookSpeed: HTMLInputElement;
   arrowLookSpeedValue: HTMLElement;
+  showFps: HTMLInputElement;
 };
 
 type StationRefs = {
@@ -94,6 +96,7 @@ type ControlSettings = {
   keyboardInvertHorizontal: boolean;
   keyboardInvertVertical: boolean;
   arrowLookSpeed: number;
+  showFps: boolean;
 };
 
 type SectorData = {
@@ -290,6 +293,7 @@ export class Aster3DGame {
       objectiveEdgeArrow: this.requireElement(root, ".objective-edge__arrow"),
       baseEdge: this.requireElement(root, "[data-base-edge]"),
       baseEdgeArrow: this.requireElement(root, "[data-base-edge-arrow]"),
+      fpsMeter: this.requireElement(root, "[data-fps-meter]"),
       status: this.requireElement(root, "[data-status]"),
       overlay: this.requireElement(root, "[data-game-over]"),
       finalScore: this.requireElement(root, "[data-final-score]"),
@@ -304,6 +308,7 @@ export class Aster3DGame {
       keyboardInvertVertical: this.requireElement(root, "[data-keyboard-invert-vertical]"),
       arrowLookSpeed: this.requireElement(root, "[data-arrow-look-speed]"),
       arrowLookSpeedValue: this.requireElement(root, "[data-arrow-look-speed-value]"),
+      showFps: this.requireElement(root, "[data-show-fps]"),
     };
     this.stationUi = {
       overlay: this.requireElement(root, "[data-station]"),
@@ -519,6 +524,13 @@ export class Aster3DGame {
       this.persistControlSettings();
       this.syncSettingsUi();
       this.setStatus(`Arrow turn rate ${this.controlSettings.arrowLookSpeed}%`, 1.2);
+    });
+
+    this.registerListener(this.settingsUi.showFps, "change", () => {
+      this.controlSettings.showFps = this.settingsUi.showFps.checked;
+      this.persistControlSettings();
+      this.syncSettingsUi();
+      this.setStatus(`FPS counter ${this.controlSettings.showFps ? "enabled" : "disabled"}`, 1.2);
     });
   }
 
@@ -2002,6 +2014,9 @@ export class Aster3DGame {
     this.hud.boostVeil.style.setProperty("-webkit-backdrop-filter", `blur(${blur}px) saturate(${saturate})`);
     this.updateObjectiveHud();
     this.updateBaseHud();
+    if (this.controlSettings.showFps) {
+      this.hud.fpsMeter.textContent = `FPS ${Math.round(this.engine.getFps())}`;
+    }
     if (this.stationOpen) {
       this.updateStationUi();
     }
@@ -2176,6 +2191,8 @@ export class Aster3DGame {
     this.settingsUi.keyboardInvertVertical.checked = this.controlSettings.keyboardInvertVertical;
     this.settingsUi.arrowLookSpeed.value = String(this.controlSettings.arrowLookSpeed);
     this.settingsUi.arrowLookSpeedValue.textContent = `${this.controlSettings.arrowLookSpeed}%`;
+    this.settingsUi.showFps.checked = this.controlSettings.showFps;
+    this.hud.fpsMeter.classList.toggle("hidden", !this.controlSettings.showFps);
   }
 
   private loadControlSettings(): ControlSettings {
@@ -2185,6 +2202,7 @@ export class Aster3DGame {
       keyboardInvertHorizontal: true,
       keyboardInvertVertical: false,
       arrowLookSpeed: ARROW_LOOK_SPEED_DEFAULT,
+      showFps: false,
     };
 
     const raw = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
@@ -2219,6 +2237,7 @@ export class Aster3DGame {
           0,
           100,
         ),
+        showFps: typeof parsed.showFps === "boolean" ? parsed.showFps : fallback.showFps,
       };
     } catch {
       return fallback;

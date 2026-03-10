@@ -82,6 +82,7 @@ function renderGameShell(): void {
           <span></span>
         </div>
         <div class="boost-veil" data-boost-veil></div>
+        <div class="fps-meter hidden" data-fps-meter>FPS 0</div>
         <div class="objective-edge hidden" data-objective-edge>
           <span class="objective-edge__arrow">▲</span>
           <span class="objective-edge__label">SALVAGE</span>
@@ -137,6 +138,11 @@ function renderGameShell(): void {
                 value="20"
                 data-arrow-look-speed
               />
+            </label>
+            <p class="settings-group__title">Interface</p>
+            <label class="toggle">
+              <input type="checkbox" data-show-fps />
+              <span>Show FPS counter</span>
             </label>
             <button class="overlay__action" type="button" data-close-settings>Close</button>
           </div>

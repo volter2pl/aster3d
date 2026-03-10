@@ -230,6 +230,24 @@ body {
     );
 }
 
+.fps-meter {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  z-index: 1;
+  min-width: 6rem;
+  padding: 0.55rem 0.8rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  background: var(--panel);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 0 24px rgba(0, 0, 0, 0.2), inset 0 0 16px rgba(141, 240, 255, 0.05);
+  color: var(--accent);
+  font-size: 0.9rem;
+  letter-spacing: 0.08em;
+  text-align: center;
+}
+
 .objective-edge {
   position: absolute;
   left: 0;

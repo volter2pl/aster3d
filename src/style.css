@@ -299,6 +299,24 @@ body {
   box-shadow: 0 0 16px rgba(255, 190, 92, 0.14);
 }
 
+.enemy-edge-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.objective-edge--enemy .objective-edge__arrow {
+  color: #ff8c84;
+  text-shadow: 0 0 16px rgba(255, 92, 92, 0.34);
+}
+
+.objective-edge--enemy .objective-edge__label {
+  border-color: rgba(255, 120, 120, 0.32);
+  background: rgba(41, 10, 12, 0.8);
+  color: #ffc0ba;
+  box-shadow: 0 0 16px rgba(255, 92, 92, 0.18);
+}
+
 
 .overlay {
   position: absolute;

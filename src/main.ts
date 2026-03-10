@@ -91,6 +91,7 @@ function renderGameShell(): void {
           <span class="objective-edge__arrow" data-base-edge-arrow>▲</span>
           <span class="objective-edge__label">BASE</span>
         </div>
+        <div class="enemy-edge-layer" data-enemy-edge-layer></div>
         <div class="hud__bottom">
           <div class="status" data-status>Click to engage cockpit controls</div>
         </div>

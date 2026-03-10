@@ -60,10 +60,17 @@ type HudRefs = {
   objectiveEdgeArrow: HTMLElement;
   baseEdge: HTMLElement;
   baseEdgeArrow: HTMLElement;
+  enemyEdgeLayer: HTMLElement;
   fpsMeter: HTMLElement;
   status: HTMLElement;
   overlay: HTMLElement;
   finalScore: HTMLElement;
+};
+
+type EnemyHudMarker = {
+  edge: HTMLElement;
+  arrow: HTMLElement;
+  label: HTMLElement;
 };
 
 type SettingsRefs = {
@@ -155,6 +162,7 @@ const BOOST_MAX = 100;
 const BOOST_DRAIN_PER_SECOND = 58;
 const BOOST_REGEN_PER_SECOND = 18;
 const ENEMY_ATTACK_RANGE = 165;
+const ENEMY_MARKER_DISTANCE = ENEMY_ATTACK_RANGE + 35;
 const ENEMY_MAX_SPEED = 33;
 const ENEMY_BULLET_SPEED = 92;
 const ENEMY_COLLISION_RADIUS = 5;
@@ -269,6 +277,7 @@ export class Aster3DGame {
   private objectiveDirection = new Vector3(0.24, 0.08, 0.97).normalize();
   private asteroidModelAsset: LoadedAsteroidAsset | null = null;
   private enemyModelAsset: LoadedSpacecraftAsset | null = null;
+  private readonly enemyHudMarkers: EnemyHudMarker[] = [];
 
   public static async create(root: HTMLElement): Promise<Aster3DGame> {
     const game = new Aster3DGame(root);
@@ -293,6 +302,7 @@ export class Aster3DGame {
       objectiveEdgeArrow: this.requireElement(root, ".objective-edge__arrow"),
       baseEdge: this.requireElement(root, "[data-base-edge]"),
       baseEdgeArrow: this.requireElement(root, "[data-base-edge-arrow]"),
+      enemyEdgeLayer: this.requireElement(root, "[data-enemy-edge-layer]"),
       fpsMeter: this.requireElement(root, "[data-fps-meter]"),
       status: this.requireElement(root, "[data-status]"),
       overlay: this.requireElement(root, "[data-game-over]"),
@@ -2014,6 +2024,7 @@ export class Aster3DGame {
     this.hud.boostVeil.style.setProperty("-webkit-backdrop-filter", `blur(${blur}px) saturate(${saturate})`);
     this.updateObjectiveHud();
     this.updateBaseHud();
+    this.updateEnemyHud();
     if (this.controlSettings.showFps) {
       this.hud.fpsMeter.textContent = `FPS ${Math.round(this.engine.getFps())}`;
     }
@@ -2047,6 +2058,31 @@ export class Aster3DGame {
     const baseTarget = this.getBaseDockPosition();
     const distance = this.updateEdgeMarker(baseTarget, this.hud.baseEdge, this.hud.baseEdgeArrow);
     this.hud.baseDistance.textContent = distance === null ? "--" : `${Math.round(distance)}m`;
+  }
+
+  private updateEnemyHud(): void {
+    const maxDistanceSquared = ENEMY_MARKER_DISTANCE * ENEMY_MARKER_DISTANCE;
+    const nearbyEnemies = this.enemies
+      .map((enemy) => ({
+        enemy,
+        distanceSquared: Vector3.DistanceSquared(this.shipRoot.position, enemy.root.position),
+      }))
+      .filter(({ distanceSquared }) => distanceSquared <= maxDistanceSquared)
+      .sort((left, right) => left.distanceSquared - right.distanceSquared);
+
+    this.ensureEnemyHudMarkers(nearbyEnemies.length);
+
+    for (let index = 0; index < this.enemyHudMarkers.length; index += 1) {
+      const marker = this.enemyHudMarkers[index];
+      const trackedEnemy = nearbyEnemies[index];
+      if (!trackedEnemy) {
+        marker.edge.classList.add("hidden");
+        continue;
+      }
+
+      const distance = this.updateEdgeMarker(trackedEnemy.enemy.root.position, marker.edge, marker.arrow);
+      marker.label.textContent = distance === null ? "HOSTILE" : `HOSTILE ${Math.round(distance)}m`;
+    }
   }
 
   private updateEdgeMarker(targetPosition: Vector3, edge: HTMLElement, arrow: HTMLElement): number | null {
@@ -2105,6 +2141,25 @@ export class Aster3DGame {
     arrow.style.transform = `rotate(${angle}deg)`;
     edge.classList.remove("hidden");
     return distance;
+  }
+
+  private ensureEnemyHudMarkers(count: number): void {
+    while (this.enemyHudMarkers.length < count) {
+      const edge = document.createElement("div");
+      edge.className = "objective-edge objective-edge--enemy hidden";
+
+      const arrow = document.createElement("span");
+      arrow.className = "objective-edge__arrow";
+      arrow.textContent = "▲";
+
+      const label = document.createElement("span");
+      label.className = "objective-edge__label";
+      label.textContent = "HOSTILE";
+
+      edge.append(arrow, label);
+      this.hud.enemyEdgeLayer.append(edge);
+      this.enemyHudMarkers.push({ edge, arrow, label });
+    }
   }
 
   private getDockingPrompt(): string | null {

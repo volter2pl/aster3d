@@ -10,11 +10,15 @@ import { Mesh } from "@babylonjs/core/Meshes/mesh";
 import { MeshBuilder } from "@babylonjs/core/Meshes/meshBuilder";
 import { TransformNode } from "@babylonjs/core/Meshes/transformNode";
 import { Scene } from "@babylonjs/core/scene";
+import { LoadedAsteroidAsset, loadAsteroidAsset } from "./asteroidAsset";
+import { createAsteroidPresentation } from "./asteroidPresentation";
 import { AudioManager } from "./audio";
 import { EnemyEngineGlow, createEnemyPresentation, updateEnemyEngineGlows } from "./enemyPresentation";
 import { LoadedSpacecraftAsset, loadSpacecraftAsset } from "./spacecraftAsset";
 
 type Asteroid = {
+  asteroidClass: AsteroidClass;
+  disposeCustom: () => void;
   mesh: Mesh;
   radius: number;
   size: number;
@@ -109,6 +113,15 @@ type Collectible = {
 };
 
 type EnemyState = "pursuit" | "attack" | "recover";
+type AsteroidClass = "small" | "medium" | "large" | "huge";
+
+type PlayerWeaponProfile = {
+  bulletDamage: number;
+  bulletLife: number;
+  bulletRadius: number;
+  bulletSpeed: number;
+  fireInterval: number;
+};
 
 type Enemy = {
   root: TransformNode;
@@ -130,8 +143,6 @@ const WORLD_SECTOR_SIZE = 220;
 const WORLD_LOAD_RADIUS = 2;
 const WORLD_UNLOAD_RADIUS = 3;
 const SHIP_COLLISION_RADIUS = 2.2;
-const FIRE_INTERVAL = 0.12;
-const BULLET_SPEED = 155;
 const MAX_DELTA_TIME = 0.05;
 const SETTINGS_STORAGE_KEY = "aster3d-control-settings";
 const COLLECTIBLE_PICKUP_RADIUS = 7;
@@ -147,6 +158,30 @@ const ENEMY_COLLISION_RADIUS = 2.8;
 const ENEMY_VIEW_DISTANCE = WORLD_SECTOR_SIZE * (WORLD_UNLOAD_RADIUS + 1.2);
 const ASTEROID_SALVAGE_DROP_CHANCE = 0.2;
 const ENEMY_SALVAGE_DROP_CHANCE = 0.4;
+const ASTEROID_LARGE_CHANCE = 0.15;
+const ASTEROID_HUGE_CHANCE = 0.05;
+const ASTEROID_BASE_SIZE_MIN = 2.1;
+const ASTEROID_BASE_SIZE_MAX = 5.6;
+const ASTEROID_CLASS_SCALE: Record<AsteroidClass, number> = {
+  small: 0.5,
+  medium: 1,
+  large: 2,
+  huge: 4,
+};
+const ASTEROID_CLASS_HP: Record<AsteroidClass, number> = {
+  small: 4,
+  medium: 8,
+  large: 16,
+  huge: 32,
+};
+const ENEMY_HEALTH = ASTEROID_CLASS_HP.medium;
+const PLAYER_MAXED_WEAPON: PlayerWeaponProfile = {
+  bulletDamage: 1,
+  bulletLife: 1.6,
+  bulletRadius: 0.4,
+  bulletSpeed: 155,
+  fireInterval: 0.12,
+};
 const BASE_POSITION = new Vector3(-180, 24, -340);
 const BASE_DOCK_OFFSET = new Vector3(0, -5, 34);
 const BASE_DOCK_OFFSET_APPROACH = new Vector3(0, 8, 68);
@@ -228,6 +263,7 @@ export class Aster3DGame {
   };
   private baseShieldMaterial: StandardMaterial | null = null;
   private objectiveDirection = new Vector3(0.24, 0.08, 0.97).normalize();
+  private asteroidModelAsset: LoadedAsteroidAsset | null = null;
   private enemyModelAsset: LoadedSpacecraftAsset | null = null;
 
   public static async create(root: HTMLElement): Promise<Aster3DGame> {
@@ -317,6 +353,7 @@ export class Aster3DGame {
   }
 
   private async initialize(): Promise<void> {
+    await this.loadAsteroidModelPrefab();
     await this.loadEnemyModelPrefab();
     this.resetRun();
     this.engine.runRenderLoop(this.renderLoop);
@@ -594,7 +631,7 @@ export class Aster3DGame {
 
     if (fireRequested && this.fireCooldown === 0) {
       this.fireBullet(forward);
-      this.fireCooldown = FIRE_INTERVAL;
+      this.fireCooldown = PLAYER_MAXED_WEAPON.fireInterval;
     }
   }
 
@@ -640,7 +677,7 @@ export class Aster3DGame {
           Vector3.DistanceSquared(bullet.mesh.position, asteroid.mesh.position) <=
           collisionRadius * collisionRadius
         ) {
-          this.damageAsteroid(asteroidIndex, bullet.velocity);
+          this.damageAsteroid(asteroidIndex, bullet.damage, bullet.velocity);
           this.disposeBullet(index);
           bulletDestroyed = true;
           break;
@@ -658,7 +695,7 @@ export class Aster3DGame {
           Vector3.DistanceSquared(bullet.mesh.position, enemy.root.position) <=
           collisionRadius * collisionRadius
         ) {
-          this.damageEnemy(enemyIndex, bullet.velocity);
+          this.damageEnemy(enemyIndex, bullet.damage, bullet.velocity);
           this.disposeBullet(index);
           bulletDestroyed = true;
           break;
@@ -809,7 +846,7 @@ export class Aster3DGame {
         Vector3.DistanceSquared(this.shipRoot.position, enemy.root.position) <= collisionRadius * collisionRadius
       ) {
         this.applyShipDamage(20);
-        this.damageEnemy(index, this.shipVelocity.add(currentForward.scale(10)), true);
+        this.damageEnemy(index, 99, this.shipVelocity.add(currentForward.scale(10)), true);
         this.spawnExplosion(enemy.root.position, enemy.radius * 0.9, new Color3(1, 0.34, 0.26));
         this.audio.playExplosion(0.8);
       }
@@ -872,6 +909,7 @@ export class Aster3DGame {
   }
 
   private fireBullet(forward: Vector3): void {
+    const weapon = PLAYER_MAXED_WEAPON;
     this.audio.playShot();
 
     const bulletMaterial = new StandardMaterial(`bullet-mat-${performance.now()}`, this.scene);
@@ -889,11 +927,11 @@ export class Aster3DGame {
 
     this.bullets.push({
       mesh: bulletMesh,
-      velocity: forward.scale(BULLET_SPEED).add(this.shipVelocity.scale(0.45)),
-      life: 1.6,
-      radius: 0.4,
+      velocity: forward.scale(weapon.bulletSpeed).add(this.shipVelocity.scale(0.45)),
+      life: weapon.bulletLife,
+      radius: weapon.bulletRadius,
       hostile: false,
-      damage: 1,
+      damage: weapon.bulletDamage,
     });
   }
 
@@ -930,9 +968,9 @@ export class Aster3DGame {
     });
   }
 
-  private damageAsteroid(index: number, impulse: Vector3): void {
+  private damageAsteroid(index: number, damage: number, impulse: Vector3): void {
     const asteroid = this.asteroids[index];
-    asteroid.durability -= 1;
+    asteroid.durability -= damage;
     asteroid.velocity.addInPlace(impulse.normalize().scale(3.8));
 
     this.spawnExplosion(asteroid.mesh.position, asteroid.size * 0.45, new Color3(0.58, 0.94, 1));
@@ -944,7 +982,8 @@ export class Aster3DGame {
 
     const impactPosition = asteroid.mesh.position.clone();
     const asteroidVelocity = asteroid.velocity.clone();
-    const nextSize = asteroid.size * 0.62;
+    const nextClass = getNextSmallerAsteroidClass(asteroid.asteroidClass);
+    const childSize = asteroid.size * 0.5;
 
     this.score += Math.round(asteroid.size * 28);
     this.detachAsteroidFromSector(asteroid);
@@ -956,17 +995,23 @@ export class Aster3DGame {
       this.spawnAsteroidSalvage(impactPosition);
     }
 
-    if (nextSize > 1.65) {
+    if (nextClass) {
       const splitDirection = randomUnitVector();
       this.spawnAsteroid(
-        nextSize,
-        impactPosition.add(splitDirection.scale(nextSize * 1.2)),
+        nextClass,
+        impactPosition.add(splitDirection.scale(childSize * 1.2)),
         asteroidVelocity.add(splitDirection.scale(8)),
+        null,
+        Math.random,
+        childSize,
       );
       this.spawnAsteroid(
-        nextSize * 0.92,
-        impactPosition.add(splitDirection.scale(-nextSize * 1.2)),
+        nextClass,
+        impactPosition.add(splitDirection.scale(-childSize * 1.2)),
         asteroidVelocity.add(splitDirection.scale(-8)),
+        null,
+        Math.random,
+        childSize,
       );
     }
   }
@@ -981,9 +1026,19 @@ export class Aster3DGame {
     }
   }
 
-  private damageEnemy(index: number, impulse: Vector3, collisionKill = false): void {
+  private async loadAsteroidModelPrefab(): Promise<void> {
+    try {
+      this.asteroidModelAsset?.dispose();
+      this.asteroidModelAsset = await loadAsteroidAsset(this.scene);
+    } catch (error) {
+      console.warn("Failed to load asteroid model, using procedural fallback.", error);
+      this.asteroidModelAsset = null;
+    }
+  }
+
+  private damageEnemy(index: number, damage: number, impulse: Vector3, collisionKill = false): void {
     const enemy = this.enemies[index];
-    enemy.health -= collisionKill ? 99 : 1;
+    enemy.health -= collisionKill ? 99 : damage;
     if (impulse.lengthSquared() > 0.001) {
       enemy.velocity.addInPlace(impulse.normalize().scale(4.8));
     }
@@ -1082,13 +1137,7 @@ export class Aster3DGame {
         z * WORLD_SECTOR_SIZE + rng() * WORLD_SECTOR_SIZE,
       );
 
-      const asteroid = this.spawnAsteroid(
-        randomBetween(2.1, 5.6, rng),
-        position,
-        Vector3.Zero(),
-        key,
-        rng,
-      );
+      const asteroid = this.spawnAsteroid(rollAsteroidClass(rng), position, Vector3.Zero(), key, rng);
       sector.asteroids.push(asteroid);
     }
 
@@ -1150,43 +1199,34 @@ export class Aster3DGame {
   }
 
   private spawnAsteroid(
-    size: number,
+    asteroidClass: AsteroidClass,
     position: Vector3,
     velocity: Vector3 = Vector3.Zero(),
     sectorKeyValue: string | null = null,
     rng: () => number = Math.random,
+    explicitSize?: number,
   ): Asteroid {
-    const asteroidMesh = MeshBuilder.CreateIcoSphere(
-      `asteroid-${performance.now()}`,
-      { radius: size, subdivisions: size > 2.5 ? 1 : 0 },
-      this.scene,
-    );
-    asteroidMesh.convertToFlatShadedMesh();
-    asteroidMesh.scaling = new Vector3(
-      randomBetween(0.7, 1.4, rng),
-      randomBetween(0.72, 1.36, rng),
-      randomBetween(0.74, 1.44, rng),
-    );
+    const size = explicitSize ?? rollAsteroidSizeForClass(asteroidClass, rng);
+    const asteroidMesh = new Mesh(`asteroid-${performance.now()}`, this.scene);
     asteroidMesh.position.copyFrom(position);
     asteroidMesh.rotation = new Vector3(
       randomBetween(0, Math.PI, rng),
       randomBetween(0, Math.PI, rng),
       randomBetween(0, Math.PI, rng),
     );
-
-    const asteroidMaterial = new StandardMaterial(`asteroid-mat-${performance.now()}`, this.scene);
-    const hueShift = randomBetween(-0.04, 0.08, rng);
-    asteroidMaterial.diffuseColor = new Color3(0.31 + hueShift, 0.27 + hueShift * 0.65, 0.24 + hueShift * 0.4);
-    asteroidMaterial.emissiveColor = new Color3(0.02, 0.03, 0.045);
-    asteroidMaterial.specularColor = Color3.Black();
-    asteroidMesh.material = asteroidMaterial;
+    const presentation = createAsteroidPresentation(this.scene, asteroidMesh, this.asteroidModelAsset, {
+      diameter: size * 2,
+      rng,
+    });
 
     const asteroid: Asteroid = {
+      asteroidClass,
+      disposeCustom: presentation.dispose,
       mesh: asteroidMesh,
       velocity,
-      radius: size * Math.max(asteroidMesh.scaling.x, asteroidMesh.scaling.y, asteroidMesh.scaling.z),
+      radius: size,
       size,
-      durability: Math.max(1, Math.round(size * 1.15)),
+      durability: ASTEROID_CLASS_HP[asteroidClass],
       spin: new Vector3(
         randomBetween(-1.2, 1.2, rng),
         randomBetween(-1.1, 1.1, rng),
@@ -1212,7 +1252,7 @@ export class Aster3DGame {
       root,
       velocity: randomUnitVector().scale(randomBetween(2, 8, rng)),
       radius: ENEMY_COLLISION_RADIUS,
-      health: 4,
+      health: ENEMY_HEALTH,
       fireCooldown: randomBetween(0.45, 1.2, rng),
       recoverTimer: 0,
       strafeSign: rng() > 0.5 ? 1 : -1,
@@ -1339,6 +1379,7 @@ export class Aster3DGame {
 
   private disposeAsteroid(asteroid: Asteroid): void {
     const material = asteroid.mesh.material;
+    asteroid.disposeCustom();
     asteroid.mesh.dispose();
     if (material instanceof StandardMaterial) {
       material.dispose();
@@ -2052,6 +2093,8 @@ export class Aster3DGame {
     this.clearBullets();
     this.clearExplosions();
     this.clearWorld();
+    this.asteroidModelAsset?.dispose();
+    this.asteroidModelAsset = null;
     this.enemyModelAsset?.dispose();
     this.enemyModelAsset = null;
     this.scene.dispose();
@@ -2171,6 +2214,41 @@ export class Aster3DGame {
 
 function randomBetween(min: number, max: number, rng: () => number = Math.random): number {
   return min + rng() * (max - min);
+}
+
+function rollAsteroidClass(rng: () => number = Math.random): AsteroidClass {
+  const tierRoll = rng();
+
+  if (tierRoll < ASTEROID_HUGE_CHANCE) {
+    return "huge";
+  }
+
+  if (tierRoll < ASTEROID_HUGE_CHANCE + ASTEROID_LARGE_CHANCE) {
+    return "large";
+  }
+
+  return "medium";
+}
+
+function rollAsteroidSizeForClass(asteroidClass: AsteroidClass, rng: () => number = Math.random): number {
+  const baseSize = randomBetween(ASTEROID_BASE_SIZE_MIN, ASTEROID_BASE_SIZE_MAX, rng);
+  return baseSize * ASTEROID_CLASS_SCALE[asteroidClass];
+}
+
+function getNextSmallerAsteroidClass(asteroidClass: AsteroidClass): AsteroidClass | null {
+  if (asteroidClass === "huge") {
+    return "large";
+  }
+
+  if (asteroidClass === "large") {
+    return "medium";
+  }
+
+  if (asteroidClass === "medium") {
+    return "small";
+  }
+
+  return null;
 }
 
 function randomUnitVector(): Vector3 {

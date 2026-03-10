@@ -1,25 +1,16 @@
-import { Color3 } from "@babylonjs/core/Maths/math.color";
-import { Vector3 } from "@babylonjs/core/Maths/math.vector";
-import { StandardMaterial } from "@babylonjs/core/Materials/standardMaterial";
-import { MeshBuilder } from "@babylonjs/core/Meshes/meshBuilder";
+import { loadAsteroidAsset } from "../asteroidAsset";
+import { createAsteroidPresentation } from "../asteroidPresentation";
 import { PreviewFactoryContext, PreviewHandle } from "../objectPreviewTypes";
 
-export function createAsteroidPreview(context: PreviewFactoryContext): PreviewHandle {
-  const asteroidMesh = MeshBuilder.CreateIcoSphere(
-    "preview-asteroid",
-    { radius: 4.4, subdivisions: 1 },
-    context.scene,
-  );
-  asteroidMesh.parent = context.root;
-  asteroidMesh.convertToFlatShadedMesh();
-  asteroidMesh.scaling = new Vector3(1.28, 0.94, 1.36);
-  asteroidMesh.rotation = new Vector3(0.72, 1.12, 0.38);
+export async function createAsteroidPreview(context: PreviewFactoryContext): Promise<PreviewHandle> {
+  let asset = null;
+  try {
+    asset = await loadAsteroidAsset(context.scene);
+  } catch (error) {
+    console.warn("Failed to load asteroid preview model, using procedural fallback.", error);
+  }
 
-  const asteroidMaterial = new StandardMaterial("preview-asteroid-mat", context.scene);
-  asteroidMaterial.diffuseColor = new Color3(0.34, 0.29, 0.24);
-  asteroidMaterial.emissiveColor = new Color3(0.03, 0.04, 0.055);
-  asteroidMaterial.specularColor = Color3.Black();
-  asteroidMesh.material = asteroidMaterial;
+  const presentation = createAsteroidPresentation(context.scene, context.root, asset, { diameter: 8.8 });
 
   let spinning = true;
 
@@ -35,12 +26,12 @@ export function createAsteroidPreview(context: PreviewFactoryContext): PreviewHa
         return;
       }
 
-      asteroidMesh.rotation.y += dt * 0.46;
-      asteroidMesh.rotation.x += dt * 0.14;
+      context.root.rotation.y += dt * 0.46;
+      context.root.rotation.x += dt * 0.14;
     },
     dispose: () => {
-      asteroidMesh.dispose();
-      asteroidMaterial.dispose();
+      presentation.dispose();
+      asset?.dispose();
     },
   };
 }

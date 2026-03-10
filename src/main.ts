@@ -17,7 +17,9 @@ if (!app) {
   throw new Error("Missing #app root element");
 }
 
-app.innerHTML = `
+const root = app;
+
+root.innerHTML = `
   <div class="shell">
     <canvas class="game-canvas" aria-label="Aster3D game view"></canvas>
     <div class="hud" aria-hidden="true">
@@ -173,27 +175,32 @@ function renderStartupError(root: HTMLDivElement, title: string, message: string
 
 let game: Aster3DGame | null = null;
 
-if (!Engine.IsSupported) {
-  renderStartupError(
-    app,
-    "WebGL is not available",
-    "Aster3D could not create a WebGL context, so the 3D scene cannot start.",
-  );
-} else {
+async function startGame(): Promise<void> {
+  if (!Engine.IsSupported) {
+    renderStartupError(
+      root,
+      "WebGL is not available",
+      "Aster3D could not create a WebGL context, so the 3D scene cannot start.",
+    );
+    return;
+  }
+
   try {
-    game = new Aster3DGame(app);
+    game = await Aster3DGame.create(root);
   } catch (error) {
     console.error("Failed to start Aster3D", error);
     const message =
       error instanceof Error ? error.message : "The renderer failed during startup for an unknown reason.";
-    renderStartupError(app, "3D renderer failed to start", message);
+    renderStartupError(root, "3D renderer failed to start", message);
   }
 }
+
+void startGame();
 
 if (import.meta.hot) {
   import.meta.hot.accept();
   import.meta.hot.dispose(() => {
     game?.dispose();
-    app.innerHTML = "";
+    root.innerHTML = "";
   });
 }

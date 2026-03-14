@@ -1012,7 +1012,6 @@ export class Aster3DGame {
     const nextClass = getNextSmallerAsteroidClass(asteroid.asteroidClass);
     const childSize = asteroid.size * 0.5;
 
-    this.score += Math.round(asteroid.size * 28);
     this.detachAsteroidFromSector(asteroid);
     this.disposeAsteroid(asteroid);
     this.asteroids.splice(index, 1);
@@ -1078,7 +1077,6 @@ export class Aster3DGame {
       return;
     }
 
-    this.score += 180;
     this.detachEnemyFromSector(enemy);
     this.spawnExplosion(enemy.root.position, enemy.radius * 1.15, new Color3(1, 0.24, 0.22));
     this.audio.playExplosion(0.92);
@@ -1515,7 +1513,6 @@ export class Aster3DGame {
         COLLECTIBLE_PICKUP_RADIUS * COLLECTIBLE_PICKUP_RADIUS
       ) {
         this.collectedSalvage += 1;
-        this.score += collectible.objective ? 120 : 85;
         this.audio.playPickup();
         const pickupPosition = collectible.position.clone();
         this.spawnExplosion(pickupPosition, collectible.objective ? 3.8 : 2.8, new Color3(0.38, 1, 0.72));

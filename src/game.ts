@@ -1,4 +1,5 @@
 import { UniversalCamera } from "@babylonjs/core/Cameras/universalCamera";
+import { Ray } from "@babylonjs/core/Culling/ray";
 import { Color3, Color4 } from "@babylonjs/core/Maths/math.color";
 import { Quaternion, Vector3 } from "@babylonjs/core/Maths/math.vector";
 import { Engine } from "@babylonjs/core/Engines/engine";
@@ -6,6 +7,7 @@ import { DirectionalLight } from "@babylonjs/core/Lights/directionalLight";
 import { HemisphericLight } from "@babylonjs/core/Lights/hemisphericLight";
 import { GlowLayer } from "@babylonjs/core/Layers/glowLayer";
 import { StandardMaterial } from "@babylonjs/core/Materials/standardMaterial";
+import { AbstractMesh } from "@babylonjs/core/Meshes/abstractMesh";
 import { Mesh } from "@babylonjs/core/Meshes/mesh";
 import { MeshBuilder } from "@babylonjs/core/Meshes/meshBuilder";
 import { TransformNode } from "@babylonjs/core/Meshes/transformNode";
@@ -14,6 +16,7 @@ import { LoadedAsteroidAsset, loadAsteroidAsset } from "./asteroidAsset";
 import { createAsteroidPresentation } from "./asteroidPresentation";
 import { AudioManager } from "./audio";
 import { EnemyEngineGlow, createEnemyPresentation, updateEnemyEngineGlows } from "./enemyPresentation";
+import { LoadedSpaceStationAsset, loadSpaceStationAsset } from "./spaceStationAsset";
 import { LoadedSpacecraftAsset, loadSpacecraftAsset } from "./spacecraftAsset";
 import { StationShipPreview } from "./stationShipPreview";
 
@@ -208,10 +211,21 @@ const PLAYER_MAXED_WEAPON: PlayerWeaponProfile = {
 const BASE_POSITION = new Vector3(-180, 24, -340);
 const BASE_DOCK_OFFSET = new Vector3(0, -5, 34);
 const BASE_DOCK_OFFSET_APPROACH = new Vector3(0, 8, 68);
+const BASE_DOCK_ENTRY_DISTANCE = 56;
+const BASE_DOCK_ENTRY_HEIGHT = 1.5;
+const BASE_DOCK_APPROACH_DISTANCE = 34;
+const BASE_DOCK_APPROACH_HEIGHT = 0.75;
+const BASE_AUTODOCK_PATH_MARGIN = 10;
+const BASE_AUTODOCK_STAGE0_CONTROL_HEIGHT = 2.5;
+const BASE_AUTODOCK_STAGE1_CONTROL_HEIGHT = 0.6;
+const BASE_AUTODOCK_STAGE2_CONTROL_HEIGHT = 0.35;
+const BASE_BLOCK_ROTATION_SPEED = 0.04;
 const BASE_SAFE_RADIUS = 92;
+const BASE_AUTODOCK_STAGE0_ARC_RADIUS = BASE_SAFE_RADIUS - BASE_AUTODOCK_PATH_MARGIN - 4;
 const BASE_ENEMY_AVOID_RADIUS = BASE_SAFE_RADIUS + 18;
 const BASE_COMBAT_EXCLUSION_RADIUS = BASE_SAFE_RADIUS + 70;
 const BASE_NAVIGATION_RADIUS = BASE_SAFE_RADIUS + 120;
+const BASE_STATION_MODEL_SCALE = 0.55;
 const SALVAGE_SELL_VALUE = 100;
 const SHIELD_REPAIR_COST = 2;
 const INITIAL_CARGO_CAPACITY = 1;
@@ -240,6 +254,9 @@ export class Aster3DGame {
   private readonly keys = new Set<string>();
   private readonly loadedSectors = new Map<string, SectorData>();
   private readonly baseChevronMaterials: StandardMaterial[] = [];
+  private readonly baseCollisionMeshes: AbstractMesh[] = [];
+  private readonly baseDockNodes: TransformNode[] = [];
+  private readonly baseRotatingNodes: TransformNode[] = [];
   private readonly cleanupCallbacks: Array<() => void> = [];
 
   private readonly asteroids: Asteroid[] = [];
@@ -295,6 +312,8 @@ export class Aster3DGame {
   private objectiveDirection = new Vector3(0.24, 0.08, 0.97).normalize();
   private asteroidModelAsset: LoadedAsteroidAsset | null = null;
   private enemyModelAsset: LoadedSpacecraftAsset | null = null;
+  private stationModelAsset: LoadedSpaceStationAsset | null = null;
+  private activeBaseDockNode: TransformNode | null = null;
   private readonly enemyHudMarkers: EnemyHudMarker[] = [];
 
   public static async create(root: HTMLElement): Promise<Aster3DGame> {
@@ -391,15 +410,18 @@ export class Aster3DGame {
 
     this.createCockpit();
     this.createStarfield();
-    this.createBase();
     this.stationPreview = StationShipPreview.create(root);
     this.syncSettingsUi();
     this.bindEvents();
   }
 
   private async initialize(): Promise<void> {
-    await this.loadAsteroidModelPrefab();
-    await this.loadEnemyModelPrefab();
+    await Promise.all([
+      this.loadAsteroidModelPrefab(),
+      this.loadEnemyModelPrefab(),
+      this.loadStationModelPrefab(),
+    ]);
+    this.createBase();
     this.resetRun();
     this.engine.runRenderLoop(this.renderLoop);
   }
@@ -684,7 +706,9 @@ export class Aster3DGame {
     this.boostVisual += ((boostActive ? 1 : 0) - this.boostVisual) * (1 - Math.exp(-10 * dt));
 
     this.shipVelocity.scaleInPlace(Math.exp(-0.55 * dt));
+    const previousPosition = this.shipRoot.position.clone();
     this.shipRoot.position.addInPlace(this.shipVelocity.scale(dt));
+    this.resolveShipBaseCollision(previousPosition);
     this.audio.setEngine(this.shipVelocity.length() / 160, this.boostHoldTime / 1.8);
 
     if (fireRequested && this.fireCooldown === 0) {
@@ -921,6 +945,12 @@ export class Aster3DGame {
       asteroid.mesh.rotation.y += asteroid.spin.y * dt;
       asteroid.mesh.rotation.z += asteroid.spin.z * dt;
 
+      if (this.isAsteroidInsideBaseShield(asteroid.mesh.position, asteroid.radius)) {
+        this.triggerBaseShieldFlash(asteroid.mesh.position);
+        this.damageAsteroid(index, asteroid.durability, asteroid.velocity);
+        continue;
+      }
+
       this.syncAsteroidSectorMembership(asteroid);
 
       if (
@@ -948,6 +978,46 @@ export class Aster3DGame {
           this.shipRoot.position.addInPlace(pushDirection.normalize().scale(collisionRadius + 2));
         }
       }
+    }
+  }
+
+  private resolveShipBaseCollision(previousPosition: Vector3): void {
+    if (this.baseCollisionMeshes.length === 0) {
+      return;
+    }
+
+    const travel = this.shipRoot.position.subtract(previousPosition);
+    const distance = travel.length();
+    if (distance < 0.0001) {
+      return;
+    }
+
+    const direction = travel.scale(1 / distance);
+    const ray = new Ray(previousPosition, direction, distance + SHIP_COLLISION_RADIUS + 0.05);
+    let nearestHitDistance = Number.POSITIVE_INFINITY;
+
+    for (const mesh of this.baseCollisionMeshes) {
+      if (!mesh.isEnabled() || mesh.getTotalVertices() === 0) {
+        continue;
+      }
+
+      const hit = ray.intersectsMesh(mesh, false);
+      if (!hit.hit || hit.distance < 0 || hit.distance >= nearestHitDistance) {
+        continue;
+      }
+
+      nearestHitDistance = hit.distance;
+    }
+
+    if (!Number.isFinite(nearestHitDistance)) {
+      return;
+    }
+
+    const allowedDistance = Math.max(0, nearestHitDistance - SHIP_COLLISION_RADIUS - 0.03);
+    this.shipRoot.position.copyFrom(previousPosition.add(direction.scale(allowedDistance)));
+    const velocityIntoWall = Vector3.Dot(this.shipVelocity, direction);
+    if (velocityIntoWall > 0) {
+      this.shipVelocity.subtractInPlace(direction.scale(velocityIntoWall));
     }
   }
 
@@ -1097,6 +1167,16 @@ export class Aster3DGame {
     }
   }
 
+  private async loadStationModelPrefab(): Promise<void> {
+    try {
+      this.stationModelAsset?.dispose();
+      this.stationModelAsset = await loadSpaceStationAsset(this.scene);
+    } catch (error) {
+      console.warn("Failed to load station model, using procedural fallback.", error);
+      this.stationModelAsset = null;
+    }
+  }
+
   private damageEnemy(index: number, damage: number, impulse: Vector3, collisionKill = false): void {
     const enemy = this.enemies[index];
     enemy.health -= collisionKill ? 99 : damage;
@@ -1204,13 +1284,14 @@ export class Aster3DGame {
     const sectorDistanceToShip = Vector3.Distance(this.shipRoot.position, sectorCenter);
 
     for (let index = 0; index < asteroidCount; index += 1) {
-      const position = new Vector3(
-        x * WORLD_SECTOR_SIZE + rng() * WORLD_SECTOR_SIZE,
-        y * WORLD_SECTOR_SIZE + rng() * WORLD_SECTOR_SIZE,
-        z * WORLD_SECTOR_SIZE + rng() * WORLD_SECTOR_SIZE,
-      );
+      const asteroidClass = rollAsteroidClass(rng);
+      const asteroidSize = rollAsteroidSizeForClass(asteroidClass, rng);
+      const position = this.getSectorAsteroidSpawnPosition(x, y, z, asteroidSize, rng);
+      if (!position) {
+        continue;
+      }
 
-      const asteroid = this.spawnAsteroid(rollAsteroidClass(rng), position, Vector3.Zero(), key, rng);
+      const asteroid = this.spawnAsteroid(asteroidClass, position, Vector3.Zero(), key, rng, asteroidSize);
       sector.asteroids.push(asteroid);
     }
 
@@ -1310,6 +1391,28 @@ export class Aster3DGame {
 
     this.asteroids.push(asteroid);
     return asteroid;
+  }
+
+  private getSectorAsteroidSpawnPosition(
+    sectorX: number,
+    sectorY: number,
+    sectorZ: number,
+    asteroidRadius: number,
+    rng: () => number,
+  ): Vector3 | null {
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      const position = new Vector3(
+        sectorX * WORLD_SECTOR_SIZE + rng() * WORLD_SECTOR_SIZE,
+        sectorY * WORLD_SECTOR_SIZE + rng() * WORLD_SECTOR_SIZE,
+        sectorZ * WORLD_SECTOR_SIZE + rng() * WORLD_SECTOR_SIZE,
+      );
+
+      if (!this.isAsteroidInsideBaseShield(position, asteroidRadius)) {
+        return position;
+      }
+    }
+
+    return null;
   }
 
   private spawnEnemy(position: Vector3, sectorKeyValue: string | null = null, rng: () => number = Math.random): Enemy {
@@ -1654,15 +1757,105 @@ export class Aster3DGame {
   }
 
   private getBaseDockPosition(): Vector3 {
-    return this.baseRoot.position.add(BASE_DOCK_OFFSET);
+    const dockNode = this.activeBaseDockNode ?? this.getClosestBaseDockNode(this.shipRoot.position);
+    if (!dockNode) {
+      return this.baseRoot.position.add(BASE_DOCK_OFFSET);
+    }
+
+    return dockNode.getAbsolutePosition().clone();
   }
 
   private getBaseApproachPosition(): Vector3 {
-    return this.baseRoot.position.add(BASE_DOCK_OFFSET_APPROACH);
+    const dockNode = this.activeBaseDockNode ?? this.getClosestBaseDockNode(this.shipRoot.position);
+    if (!dockNode) {
+      return this.baseRoot.position.add(BASE_DOCK_OFFSET_APPROACH);
+    }
+
+    const dockPosition = dockNode.getAbsolutePosition();
+    const outward = dockPosition.subtract(this.baseRoot.position);
+    if (outward.lengthSquared() < 0.001) {
+      return this.baseRoot.position.add(BASE_DOCK_OFFSET_APPROACH);
+    }
+
+    return this.clampAutoDockPoint(
+      dockPosition.add(outward.normalize().scale(BASE_DOCK_APPROACH_DISTANCE)).add(Vector3.Up().scale(BASE_DOCK_APPROACH_HEIGHT)),
+    );
+  }
+
+  private getBaseEntryPosition(): Vector3 {
+    const dockNode = this.activeBaseDockNode ?? this.getClosestBaseDockNode(this.shipRoot.position);
+    if (!dockNode) {
+      return this.baseRoot.position.add(BASE_DOCK_OFFSET_APPROACH);
+    }
+
+    const dockPosition = dockNode.getAbsolutePosition();
+    const outward = dockPosition.subtract(this.baseRoot.position);
+    if (outward.lengthSquared() < 0.001) {
+      return this.baseRoot.position.add(BASE_DOCK_OFFSET_APPROACH);
+    }
+
+    return this.clampAutoDockPoint(
+      dockPosition.add(outward.normalize().scale(BASE_DOCK_ENTRY_DISTANCE)).add(Vector3.Up().scale(BASE_DOCK_ENTRY_HEIGHT)),
+    );
+  }
+
+  private clampAutoDockPoint(point: Vector3): Vector3 {
+    const fromBase = point.subtract(this.baseRoot.position);
+    const maxDistance = Math.max(0, BASE_SAFE_RADIUS - BASE_AUTODOCK_PATH_MARGIN);
+    const distance = fromBase.length();
+    if (distance <= maxDistance || distance < 0.0001) {
+      return point;
+    }
+
+    return this.baseRoot.position.add(fromBase.scale(maxDistance / distance));
+  }
+
+  private getClosestBaseDockNode(referencePosition: Vector3): TransformNode | null {
+    if (this.baseDockNodes.length === 0) {
+      return null;
+    }
+
+    let nearestDock = this.baseDockNodes[0];
+    let nearestDistanceSquared = Vector3.DistanceSquared(referencePosition, nearestDock.getAbsolutePosition());
+    for (let index = 1; index < this.baseDockNodes.length; index += 1) {
+      const dockNode = this.baseDockNodes[index];
+      const distanceSquared = Vector3.DistanceSquared(referencePosition, dockNode.getAbsolutePosition());
+      if (distanceSquared < nearestDistanceSquared) {
+        nearestDock = dockNode;
+        nearestDistanceSquared = distanceSquared;
+      }
+    }
+
+    return nearestDock;
+  }
+
+  private updateActiveBaseDock(referencePosition: Vector3): void {
+    this.activeBaseDockNode = this.getClosestBaseDockNode(referencePosition);
+  }
+
+  private alignShipToBaseDock(): void {
+    const dockPosition = this.getBaseDockPosition();
+    const launchDirection = dockPosition.subtract(this.baseRoot.position);
+    if (launchDirection.lengthSquared() < 0.001) {
+      return;
+    }
+
+    this.shipRoot.rotationQuaternion = this.scene.useRightHandedSystem
+      ? Quaternion.FromLookDirectionRH(launchDirection.normalize(), Vector3.Up())
+      : Quaternion.FromLookDirectionLH(launchDirection.normalize(), Vector3.Up());
+  }
+
+  private hasImportedNodeName(nodeName: string, sourceName: string): boolean {
+    return nodeName === sourceName || nodeName.startsWith(`${sourceName}-`);
   }
 
   private isInsideBaseShield(position: Vector3): boolean {
     return Vector3.DistanceSquared(position, this.baseRoot.position) <= BASE_SAFE_RADIUS * BASE_SAFE_RADIUS;
+  }
+
+  private isAsteroidInsideBaseShield(position: Vector3, radius: number): boolean {
+    const shieldRadius = BASE_SAFE_RADIUS + radius;
+    return Vector3.DistanceSquared(position, this.baseRoot.position) <= shieldRadius * shieldRadius;
   }
 
   private triggerBaseShieldFlash(position: Vector3): void {
@@ -1683,6 +1876,7 @@ export class Aster3DGame {
   }
 
   private startAutoDock(): void {
+    this.updateActiveBaseDock(this.shipRoot.position);
     this.autoDockActive = true;
     this.beginAutoDockStage(0);
     this.keys.clear();
@@ -1692,30 +1886,53 @@ export class Aster3DGame {
     this.setStatus("Station field captured. Autodocking...", 999);
   }
 
-  private beginAutoDockStage(stage: number): void {
+  private beginAutoDockStage(stage: number, startDirectionHint?: Vector3): void {
     this.autoDockStage = stage;
     this.autoDockProgress = 0;
 
     const stageStart = this.shipRoot.position.clone();
-    const stageEnd = stage === 0 ? this.getBaseApproachPosition() : this.getBaseDockPosition();
+    const stageEnd = stage === 0
+      ? this.getBaseEntryPosition()
+      : stage === 1
+        ? this.getBaseApproachPosition()
+        : this.getBaseDockPosition();
     const midpoint = stageStart.add(stageEnd).scale(0.5);
     const awayFromBase = stageStart.subtract(this.baseRoot.position);
     const outward = awayFromBase.lengthSquared() > 0.001 ? awayFromBase.normalize() : Vector3.Forward();
+    const endOutward = stageEnd.subtract(this.baseRoot.position);
+    const endDirection = endOutward.lengthSquared() > 0.001 ? endOutward.normalize() : outward;
+    const arcDirection = awayFromBase.add(endOutward).lengthSquared() > 0.001
+      ? awayFromBase.add(endOutward).normalize()
+      : endDirection;
+    const startDirection = startDirectionHint && startDirectionHint.lengthSquared() > 0.001
+      ? startDirectionHint.normalize()
+      : stageEnd.subtract(stageStart).lengthSquared() > 0.001
+        ? stageEnd.subtract(stageStart).normalize()
+        : endDirection;
 
     this.autoDockPathStart.copyFrom(stageStart);
     this.autoDockPathEnd.copyFrom(stageEnd);
-    this.autoDockPathControl.copyFrom(
-      stage === 0
-        ? midpoint.add(Vector3.Up().scale(12)).add(outward.scale(16))
-        : midpoint.add(Vector3.Up().scale(8)).add(outward.scale(4)),
-    );
+    const baseControlPoint = stage === 0
+      ? this.baseRoot.position
+          .add(arcDirection.scale(BASE_AUTODOCK_STAGE0_ARC_RADIUS))
+          .add(Vector3.Up().scale(BASE_AUTODOCK_STAGE0_CONTROL_HEIGHT))
+      : stage === 1
+        ? midpoint.add(Vector3.Up().scale(BASE_AUTODOCK_STAGE1_CONTROL_HEIGHT)).add(endDirection.scale(8))
+        : midpoint.add(Vector3.Up().scale(BASE_AUTODOCK_STAGE2_CONTROL_HEIGHT)).add(endDirection.scale(2));
+    const tangentLeadDistance = stage === 1 ? 10 : stage === 2 ? 5 : 0;
+    const controlPoint = tangentLeadDistance > 0
+      ? stageStart.add(startDirection.scale(tangentLeadDistance)).add(baseControlPoint).scale(0.5)
+      : baseControlPoint;
+    this.autoDockPathControl.copyFrom(this.clampAutoDockPoint(controlPoint));
 
     const pathLength =
       Vector3.Distance(this.autoDockPathStart, this.autoDockPathControl) +
       Vector3.Distance(this.autoDockPathControl, this.autoDockPathEnd);
     this.autoDockDuration = stage === 0
-      ? Math.max(1.35, pathLength / 34)
-      : Math.max(0.9, pathLength / 22);
+      ? Math.max(1.25, pathLength / 38)
+      : stage === 1
+        ? Math.max(1, pathLength / 28)
+        : Math.max(0.8, pathLength / 20);
   }
 
   private updateAutoDock(dt: number): void {
@@ -1750,9 +1967,14 @@ export class Aster3DGame {
 
     if (t >= 1) {
       this.shipVelocity.setAll(0);
+      const exitDirection = this.autoDockPathEnd.subtract(this.autoDockPathControl);
+      const transitionDirection = exitDirection.lengthSquared() > 0.001 ? exitDirection.normalize() : undefined;
       if (this.autoDockStage === 0) {
+        this.shipRoot.position.copyFrom(this.getBaseEntryPosition());
+        this.beginAutoDockStage(1, transitionDirection);
+      } else if (this.autoDockStage === 1) {
         this.shipRoot.position.copyFrom(this.getBaseApproachPosition());
-        this.beginAutoDockStage(1);
+        this.beginAutoDockStage(2, transitionDirection);
       } else {
         this.shipRoot.position.copyFrom(this.getBaseDockPosition());
         this.openStation();
@@ -1760,7 +1982,7 @@ export class Aster3DGame {
     }
   }
 
-  private updateBaseVisuals(_dt: number): void {
+  private updateBaseVisuals(dt: number): void {
     if (this.baseShieldMaterial) {
       this.baseShieldMaterial.alpha = 0.08 + this.baseShieldFlash * 0.22;
       this.baseShieldMaterial.emissiveColor = new Color3(
@@ -1776,15 +1998,25 @@ export class Aster3DGame {
       this.baseChevronMaterials[index].emissiveColor = new Color3(0.78 * glow, 0.54 * glow, 0.14 * glow);
       this.baseChevronMaterials[index].alpha = 0.54 + glow * 0.26;
     }
+
+    for (const rotatingNode of this.baseRotatingNodes) {
+      const currentRotation = rotatingNode.rotationQuaternion ?? Quaternion.FromEulerAngles(
+        rotatingNode.rotation.x,
+        rotatingNode.rotation.y,
+        rotatingNode.rotation.z,
+      );
+      const deltaRotation = Quaternion.FromEulerAngles(0, 0, BASE_BLOCK_ROTATION_SPEED * dt);
+      rotatingNode.rotationQuaternion = currentRotation.multiply(deltaRotation).normalize();
+    }
   }
 
   private createBase(): void {
     this.baseRoot.position.copyFrom(BASE_POSITION);
-
-    const hullMaterial = new StandardMaterial("base-hull-mat", this.scene);
-    hullMaterial.diffuseColor = new Color3(0.36, 0.37, 0.43);
-    hullMaterial.emissiveColor = new Color3(0.05, 0.05, 0.08);
-    hullMaterial.specularColor = new Color3(0.1, 0.1, 0.1);
+    this.baseCollisionMeshes.length = 0;
+    this.baseDockNodes.length = 0;
+    this.baseRotatingNodes.length = 0;
+    this.baseChevronMaterials.length = 0;
+    this.activeBaseDockNode = null;
 
     const accentMaterial = new StandardMaterial("base-accent-mat", this.scene);
     accentMaterial.disableLighting = true;
@@ -1805,6 +2037,80 @@ export class Aster3DGame {
     shieldMaterial.backFaceCulling = false;
     this.baseShieldMaterial = shieldMaterial;
 
+    const shield = MeshBuilder.CreateSphere("base-shield", { diameter: BASE_SAFE_RADIUS * 2, segments: 20 }, this.scene);
+    shield.parent = this.baseRoot;
+    shield.material = shieldMaterial;
+
+    if (this.stationModelAsset) {
+      const stationRoot = new TransformNode("base-station-visual-root", this.scene);
+      stationRoot.parent = this.baseRoot;
+      stationRoot.scaling.setAll(BASE_STATION_MODEL_SCALE);
+
+      const instance = this.stationModelAsset.prefab.instantiateModelsToScene(
+        (sourceName) => `${sourceName}-${performance.now()}`,
+        false,
+        { doNotInstantiate: true },
+      );
+
+      for (const node of instance.rootNodes) {
+        node.parent = stationRoot;
+      }
+
+      const rotatingBlock = stationRoot
+        .getChildTransformNodes(false)
+        .find((node) => this.hasImportedNodeName(node.name, "Blocks01_block_0")) ?? null;
+      if (rotatingBlock) {
+        this.baseRotatingNodes.push(rotatingBlock);
+      }
+
+      for (const mesh of stationRoot.getChildMeshes()) {
+        const materialEntry = [...this.stationModelAsset.materialsByMeshName.entries()].find(([sourceName]) =>
+          this.hasImportedNodeName(mesh.name, sourceName)
+        );
+        mesh.material = materialEntry?.[1] ?? null;
+        if (mesh.getTotalVertices() > 0) {
+          this.baseCollisionMeshes.push(mesh);
+        }
+      }
+
+      for (const dockName of ["dock_1", "dock_2"]) {
+        const dockNode = stationRoot
+          .getChildTransformNodes(false)
+          .find((node) => this.hasImportedNodeName(node.name, dockName)) ?? null;
+        if (!dockNode) {
+          continue;
+        }
+
+        this.baseDockNodes.push(dockNode);
+
+        const chevronMaterial = new StandardMaterial(`base-chevron-${dockNode.name}`, this.scene);
+        chevronMaterial.disableLighting = true;
+        chevronMaterial.emissiveColor = new Color3(0.78, 0.54, 0.14);
+        chevronMaterial.diffuseColor = new Color3(0.82, 0.58, 0.18);
+        chevronMaterial.alpha = 0.75;
+        this.baseChevronMaterials.push(chevronMaterial);
+
+        const chevron = MeshBuilder.CreateCylinder(
+          `base-chevron-mesh-${dockNode.name}`,
+          { height: 0.18, diameterTop: 0, diameterBottom: 4.8, tessellation: 3 },
+          this.scene,
+        );
+        chevron.parent = dockNode;
+        chevron.position.set(0, -2.4, 0);
+        chevron.rotation.x = Math.PI * 0.5;
+        chevron.rotation.z = Math.PI;
+        chevron.material = chevronMaterial;
+      }
+
+      this.activeBaseDockNode = this.getClosestBaseDockNode(this.shipRoot.position);
+      return;
+    }
+
+    const hullMaterial = new StandardMaterial("base-hull-mat", this.scene);
+    hullMaterial.diffuseColor = new Color3(0.36, 0.37, 0.43);
+    hullMaterial.emissiveColor = new Color3(0.05, 0.05, 0.08);
+    hullMaterial.specularColor = new Color3(0.1, 0.1, 0.1);
+
     const core = MeshBuilder.CreateCylinder(
       "base-core",
       { height: 12, diameter: 8.6, tessellation: 10 },
@@ -1813,6 +2119,7 @@ export class Aster3DGame {
     core.parent = this.baseRoot;
     core.rotation.x = Math.PI * 0.5;
     core.material = hullMaterial;
+    this.baseCollisionMeshes.push(core);
 
     const spine = MeshBuilder.CreateBox(
       "base-spine",
@@ -1821,6 +2128,7 @@ export class Aster3DGame {
     );
     spine.parent = this.baseRoot;
     spine.material = hullMaterial;
+    this.baseCollisionMeshes.push(spine);
 
     const hangar = MeshBuilder.CreateBox(
       "base-hangar",
@@ -1830,6 +2138,7 @@ export class Aster3DGame {
     hangar.parent = this.baseRoot;
     hangar.position.z = 16;
     hangar.material = hullMaterial;
+    this.baseCollisionMeshes.push(hangar);
 
     const dock = MeshBuilder.CreateCylinder(
       "base-dock",
@@ -1840,6 +2149,7 @@ export class Aster3DGame {
     dock.rotation.x = Math.PI * 0.5;
     dock.position.z = 21.5;
     dock.material = accentMaterial;
+    this.baseCollisionMeshes.push(dock);
 
     const dishLeft = MeshBuilder.CreateBox(
       "base-wing-l",
@@ -1850,6 +2160,7 @@ export class Aster3DGame {
     dishLeft.position.set(-11.5, 0, -3.5);
     dishLeft.rotation.z = 0.1;
     dishLeft.material = hullMaterial;
+    this.baseCollisionMeshes.push(dishLeft);
 
     const dishRight = MeshBuilder.CreateBox(
       "base-wing-r",
@@ -1860,15 +2171,19 @@ export class Aster3DGame {
     dishRight.position.set(11.5, 0, -3.5);
     dishRight.rotation.z = -0.1;
     dishRight.material = hullMaterial;
+    this.baseCollisionMeshes.push(dishRight);
 
     const beacon = MeshBuilder.CreateSphere("base-beacon", { diameter: 2.4, segments: 8 }, this.scene);
     beacon.parent = this.baseRoot;
     beacon.position.set(0, 0, 27.5);
     beacon.material = beaconMaterial;
+    this.baseCollisionMeshes.push(beacon);
 
-    const shield = MeshBuilder.CreateSphere("base-shield", { diameter: BASE_SAFE_RADIUS * 2, segments: 20 }, this.scene);
-    shield.parent = this.baseRoot;
-    shield.material = shieldMaterial;
+    const fallbackDock = new TransformNode("base-dock-fallback", this.scene);
+    fallbackDock.parent = this.baseRoot;
+    fallbackDock.position.copyFrom(BASE_DOCK_OFFSET);
+    this.baseDockNodes.push(fallbackDock);
+    this.activeBaseDockNode = fallbackDock;
 
     for (let index = 0; index < 4; index += 1) {
       const chevronMaterial = new StandardMaterial(`base-chevron-${index}`, this.scene);
@@ -1896,6 +2211,7 @@ export class Aster3DGame {
   }
 
   private dockShipAtBase(message: string, status: string): void {
+    this.updateActiveBaseDock(this.shipRoot.position);
     this.autoDockActive = false;
     this.autoDockStage = 0;
     this.autoDockProgress = 0;
@@ -1905,6 +2221,7 @@ export class Aster3DGame {
     this.keys.clear();
     this.shipVelocity.setAll(0);
     this.shipRoot.position.copyFrom(this.getBaseDockPosition());
+    this.alignShipToBaseDock();
     this.stationUi.overlay.classList.remove("hidden");
     if (document.pointerLockElement === this.canvas) {
       document.exitPointerLock();
@@ -2335,6 +2652,8 @@ export class Aster3DGame {
     this.asteroidModelAsset = null;
     this.enemyModelAsset?.dispose();
     this.enemyModelAsset = null;
+    this.stationModelAsset?.dispose();
+    this.stationModelAsset = null;
     this.stationPreview.dispose();
     this.scene.dispose();
     this.engine.dispose();

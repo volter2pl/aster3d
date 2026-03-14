@@ -15,6 +15,7 @@ import { createAsteroidPresentation } from "./asteroidPresentation";
 import { AudioManager } from "./audio";
 import { EnemyEngineGlow, createEnemyPresentation, updateEnemyEngineGlows } from "./enemyPresentation";
 import { LoadedSpacecraftAsset, loadSpacecraftAsset } from "./spacecraftAsset";
+import { StationShipPreview } from "./stationShipPreview";
 
 type Asteroid = {
   asteroidClass: AsteroidClass;
@@ -61,6 +62,8 @@ type HudRefs = {
   baseEdge: HTMLElement;
   baseEdgeArrow: HTMLElement;
   enemyEdgeLayer: HTMLElement;
+  cargoAlert: HTMLElement;
+  cargoAlertCopy: HTMLElement;
   fpsMeter: HTMLElement;
   status: HTMLElement;
   overlay: HTMLElement;
@@ -89,11 +92,19 @@ type SettingsRefs = {
 type StationRefs = {
   overlay: HTMLElement;
   cargo: HTMLElement;
+  cargoCapacity: HTMLElement;
+  cargoCost: HTMLElement;
+  cargoForecast: HTMLElement;
+  cargoLevel: HTMLElement;
+  featureCopy: HTMLElement;
+  featureLine: HTMLElement;
+  featureTitle: HTMLElement;
   points: HTMLElement;
   shield: HTMLElement;
   message: HTMLElement;
   sellButton: HTMLButtonElement;
   repairButton: HTMLButtonElement;
+  cargoUpgradeButton: HTMLButtonElement;
   undockButton: HTMLButtonElement;
 };
 
@@ -203,6 +214,8 @@ const BASE_COMBAT_EXCLUSION_RADIUS = BASE_SAFE_RADIUS + 70;
 const BASE_NAVIGATION_RADIUS = BASE_SAFE_RADIUS + 120;
 const SALVAGE_SELL_VALUE = 100;
 const SHIELD_REPAIR_COST = 2;
+const INITIAL_CARGO_CAPACITY = 1;
+const CARGO_UPGRADE_BASE_COST = 200;
 const ARROW_LOOK_SPEED_MIN = 0.6;
 const ARROW_LOOK_SPEED_MAX = 3.4;
 const ARROW_LOOK_SPEED_DEFAULT = 20;
@@ -222,6 +235,7 @@ export class Aster3DGame {
   private readonly shipRoot: TransformNode;
   private readonly starfieldRoot: TransformNode;
   private readonly baseRoot: TransformNode;
+  private readonly stationPreview: StationShipPreview;
   private readonly audio = new AudioManager();
   private readonly keys = new Set<string>();
   private readonly loadedSectors = new Map<string, SectorData>();
@@ -253,9 +267,13 @@ export class Aster3DGame {
   private baseShieldFlash = 0;
   private worldSeed = Math.random();
   private collectedSalvage = 0;
+  private cargoUpgradeLevel = 0;
   private boostCharge = BOOST_MAX;
   private boostVisual = 0;
   private boostHoldTime = 0;
+  private cargoFullStatusCooldown = 0;
+  private cargoAlertFlash = 0;
+  private cargoAlertStashed = false;
   private disposed = false;
   private cockpitImageSource: HTMLCanvasElement | null = null;
 
@@ -303,6 +321,8 @@ export class Aster3DGame {
       baseEdge: this.requireElement(root, "[data-base-edge]"),
       baseEdgeArrow: this.requireElement(root, "[data-base-edge-arrow]"),
       enemyEdgeLayer: this.requireElement(root, "[data-enemy-edge-layer]"),
+      cargoAlert: this.requireElement(root, "[data-cargo-alert]"),
+      cargoAlertCopy: this.requireElement(root, "[data-cargo-alert-copy]"),
       fpsMeter: this.requireElement(root, "[data-fps-meter]"),
       status: this.requireElement(root, "[data-status]"),
       overlay: this.requireElement(root, "[data-game-over]"),
@@ -323,11 +343,19 @@ export class Aster3DGame {
     this.stationUi = {
       overlay: this.requireElement(root, "[data-station]"),
       cargo: this.requireElement(root, "[data-station-cargo]"),
+      cargoCapacity: this.requireElement(root, "[data-station-cargo-capacity]"),
+      cargoCost: this.requireElement(root, "[data-station-cargo-cost]"),
+      cargoForecast: this.requireElement(root, "[data-station-cargo-forecast]"),
+      cargoLevel: this.requireElement(root, "[data-station-cargo-level]"),
+      featureCopy: this.requireElement(root, "[data-station-feature-copy]"),
+      featureLine: this.requireElement(root, "[data-station-feature-line]"),
+      featureTitle: this.requireElement(root, "[data-station-feature-title]"),
       points: this.requireElement(root, "[data-station-points]"),
       shield: this.requireElement(root, "[data-station-shield]"),
       message: this.requireElement(root, "[data-station-message]"),
       sellButton: this.requireElement(root, "[data-sell-salvage]"),
       repairButton: this.requireElement(root, "[data-repair-shields]"),
+      cargoUpgradeButton: this.requireElement(root, "[data-upgrade-cargo]"),
       undockButton: this.requireElement(root, "[data-undock]"),
     };
     this.controlSettings = this.loadControlSettings();
@@ -364,6 +392,7 @@ export class Aster3DGame {
     this.createCockpit();
     this.createStarfield();
     this.createBase();
+    this.stationPreview = StationShipPreview.create(root);
     this.syncSettingsUi();
     this.bindEvents();
   }
@@ -483,6 +512,10 @@ export class Aster3DGame {
       this.repairShields();
     });
 
+    this.registerListener(this.stationUi.cargoUpgradeButton, "click", () => {
+      this.upgradeCargoBay();
+    });
+
     this.registerListener(this.stationUi.undockButton, "click", () => {
       this.closeStation();
     });
@@ -571,6 +604,8 @@ export class Aster3DGame {
     this.fireCooldown = Math.max(0, this.fireCooldown - dt);
     this.invulnerability = Math.max(0, this.invulnerability - dt);
     this.statusFlash = Math.max(0, this.statusFlash - dt);
+    this.cargoFullStatusCooldown = Math.max(0, this.cargoFullStatusCooldown - dt);
+    this.cargoAlertFlash = Math.max(0, this.cargoAlertFlash - dt);
     this.baseShieldFlash = Math.max(0, this.baseShieldFlash - dt * 2.4);
 
     this.syncWorldSectors();
@@ -1353,6 +1388,10 @@ export class Aster3DGame {
     this.baseDockRearmRequired = false;
     this.baseShieldFlash = 0;
     this.collectedSalvage = 0;
+    this.cargoUpgradeLevel = 0;
+    this.cargoFullStatusCooldown = 0;
+    this.cargoAlertFlash = 0;
+    this.cargoAlertStashed = false;
     this.worldSeed = Math.random();
     this.objectiveDirection = new Vector3(0.24, 0.08, 0.97).normalize();
     this.stationOpen = false;
@@ -1512,6 +1551,15 @@ export class Aster3DGame {
         Vector3.DistanceSquared(this.shipRoot.position, collectible.position) <=
         COLLECTIBLE_PICKUP_RADIUS * COLLECTIBLE_PICKUP_RADIUS
       ) {
+        if (this.collectedSalvage >= this.getCargoCapacity()) {
+          if (this.cargoFullStatusCooldown === 0) {
+            this.setStatus("Cargo bay full. Salvage clamp rejected.", 1.8);
+            this.showCargoFullAlert();
+            this.cargoFullStatusCooldown = 1.2;
+          }
+          continue;
+        }
+
         this.collectedSalvage += 1;
         this.audio.playPickup();
         const pickupPosition = collectible.position.clone();
@@ -1878,9 +1926,21 @@ export class Aster3DGame {
   }
 
   private updateStationUi(message?: string): void {
-    this.stationUi.cargo.textContent = this.collectedSalvage.toString();
+    const cargoCapacity = this.getCargoCapacity();
+    const cargoUpgradeCost = this.getCargoUpgradeCost();
+    this.stationUi.cargo.textContent = `${this.collectedSalvage} / ${cargoCapacity}`;
+    this.stationUi.cargoCapacity.textContent = `${cargoCapacity} ${cargoCapacity === 1 ? "slot" : "slots"}`;
+    this.stationUi.cargoCost.textContent = `${cargoUpgradeCost} pts`;
+    this.stationUi.cargoForecast.textContent = this.getCargoUpgradeForecast();
+    this.stationUi.cargoLevel.textContent = `LVL ${this.cargoUpgradeLevel}`;
+    this.stationUi.featureTitle.textContent = "Cargo expansion rack installed";
+    this.stationUi.featureLine.textContent = `Level ${this.cargoUpgradeLevel} // cargo hold operating at ${cargoCapacity} ${cargoCapacity === 1 ? "slot" : "slots"}.`;
+    this.stationUi.featureCopy.textContent =
+      "Add one salvage slot per install to stay longer in hostile sectors before banking your run.";
     this.stationUi.points.textContent = this.score.toString();
     this.stationUi.shield.textContent = `${Math.round(this.shield)}%`;
+    this.stationUi.cargoUpgradeButton.disabled = this.score < cargoUpgradeCost;
+    this.stationUi.cargoUpgradeButton.textContent = `Install cargo slot // ${cargoUpgradeCost} pts`;
     if (message) {
       this.stationUi.message.textContent = message;
     }
@@ -1915,6 +1975,18 @@ export class Aster3DGame {
     this.shield += affordableRepair;
     this.score -= affordableRepair * SHIELD_REPAIR_COST;
     this.updateStationUi(`Repaired shields by ${affordableRepair}% for ${affordableRepair * SHIELD_REPAIR_COST} points.`);
+  }
+
+  private upgradeCargoBay(): void {
+    const cost = this.getCargoUpgradeCost();
+    if (this.score < cost) {
+      this.updateStationUi(`Insufficient points for cargo expansion. Need ${cost} points.`);
+      return;
+    }
+
+    this.score -= cost;
+    this.cargoUpgradeLevel += 1;
+    this.updateStationUi(`Cargo bay expanded to ${this.getCargoCapacity()} slots for ${cost} points.`);
   }
 
   private createCockpit(): void {
@@ -2028,7 +2100,7 @@ export class Aster3DGame {
     this.hud.score.textContent = this.score.toString();
     this.hud.lives.textContent = this.lives.toString();
     this.hud.shield.textContent = `${Math.round(this.shield)}%`;
-    this.hud.cargo.textContent = this.collectedSalvage.toString();
+    this.hud.cargo.textContent = `${this.collectedSalvage}/${this.getCargoCapacity()}`;
     this.hud.boost.textContent = `${Math.round(this.boostCharge)}%`;
     this.hud.speed.textContent = Math.round(this.shipVelocity.length()).toString();
     this.hud.boostVeil.style.opacity = `${this.boostVisual}`;
@@ -2045,6 +2117,22 @@ export class Aster3DGame {
     if (this.stationOpen) {
       this.updateStationUi();
     }
+
+    const cargoStillFull = !this.stationOpen && !this.gameOver && this.collectedSalvage >= this.getCargoCapacity();
+    if (!cargoStillFull) {
+      this.cargoAlertStashed = false;
+    } else if (this.cargoAlertFlash === 0) {
+      this.cargoAlertStashed = true;
+    }
+
+    const cargoAlertBroadcast = cargoStillFull && !this.cargoAlertStashed;
+    const cargoAlertStashed = cargoStillFull && this.cargoAlertStashed;
+    const cargoAlertVisible = cargoStillFull;
+    this.hud.cargoAlert.classList.toggle("hidden", !cargoAlertVisible);
+    this.hud.cargoAlert.classList.toggle("cargo-alert--broadcast", cargoAlertBroadcast);
+    this.hud.cargoAlert.classList.toggle("cargo-alert--stashed", cargoAlertStashed);
+    this.hud.cargoAlert.setAttribute("aria-hidden", cargoAlertVisible ? "false" : "true");
+    this.hud.cargoAlert.style.opacity = cargoAlertBroadcast ? `${Math.min(1, 0.38 + this.cargoAlertFlash / 0.18)}` : "1";
 
     if (this.statusFlash === 0 && !this.gameOver && !this.stationOpen) {
       const dockingPrompt = this.getDockingPrompt();
@@ -2193,6 +2281,29 @@ export class Aster3DGame {
     return "Station field will capture your ship automatically";
   }
 
+  private getCargoCapacity(): number {
+    return INITIAL_CARGO_CAPACITY + this.cargoUpgradeLevel;
+  }
+
+  private getCargoUpgradeCost(): number {
+    return CARGO_UPGRADE_BASE_COST * 2 ** this.cargoUpgradeLevel;
+  }
+
+  private getCargoUpgradeForecast(): string {
+    return Array.from({ length: 3 }, (_, index) => {
+      const previewLevel = this.cargoUpgradeLevel + index;
+      const previewCapacity = INITIAL_CARGO_CAPACITY + previewLevel + 1;
+      const previewCost = CARGO_UPGRADE_BASE_COST * 2 ** previewLevel;
+      return `${previewCapacity} slots / ${previewCost} pts`;
+    }).join("  •  ");
+  }
+
+  private showCargoFullAlert(): void {
+    this.hud.cargoAlertCopy.textContent = "No free cargo slots. Salvage left in open space.";
+    this.cargoAlertFlash = 1.25;
+    this.cargoAlertStashed = false;
+  }
+
   private setStatus(text: string, duration: number): void {
     this.hud.status.textContent = text;
     this.statusFlash = duration;
@@ -2224,6 +2335,7 @@ export class Aster3DGame {
     this.asteroidModelAsset = null;
     this.enemyModelAsset?.dispose();
     this.enemyModelAsset = null;
+    this.stationPreview.dispose();
     this.scene.dispose();
     this.engine.dispose();
     this.audio.dispose();

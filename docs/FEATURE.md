@@ -28,7 +28,7 @@ Visual feedback ideas:
 
 ### 2. Cargo Upgrades
 
-- The player starts with only 3 cargo slots.
+- The player starts with only 1 cargo slot.
 - Additional cargo slots can be purchased at the base.
 - Each next cargo slot costs 2x more than the previous one.
 

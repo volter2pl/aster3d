@@ -48,7 +48,7 @@ function renderGameShell(): void {
           </div>
           <div class="panel">
             <span class="panel__label">Cargo</span>
-            <span class="panel__value" data-cargo>0</span>
+            <span class="panel__value" data-cargo>0/1</span>
           </div>
           <div class="panel">
             <span class="panel__label">Boost</span>
@@ -92,6 +92,11 @@ function renderGameShell(): void {
           <span class="objective-edge__label">BASE</span>
         </div>
         <div class="enemy-edge-layer" data-enemy-edge-layer></div>
+        <div class="cargo-alert hidden" data-cargo-alert aria-hidden="true">
+          <span class="cargo-alert__eyebrow">Warning</span>
+          <strong class="cargo-alert__title">Cargo Full</strong>
+          <span class="cargo-alert__copy" data-cargo-alert-copy>No free cargo slots. Salvage left in open space.</span>
+        </div>
         <div class="hud__bottom">
           <div class="status" data-status>Click to engage cockpit controls</div>
         </div>
@@ -150,27 +155,103 @@ function renderGameShell(): void {
         </div>
         <div class="overlay hidden" data-station>
           <div class="overlay__card overlay__card--station">
-            <p class="overlay__eyebrow overlay__eyebrow--safe">Docked</p>
-            <h2>Frontier Station</h2>
-            <div class="station-grid">
-              <div class="station-stat">
-                <span>Cargo</span>
-                <strong data-station-cargo>0</strong>
+            <div class="station-arcade">
+              <div class="station-arcade__header">
+                <div class="station-logo">
+                  <span class="station-logo__kicker">Frontier Station</span>
+                  <strong class="station-logo__title">THE SHIPYARD</strong>
+                </div>
+                <div class="station-arcade__header-meta">
+                  <span>Docked // Bay 03</span>
+                  <span>Scavenger program online</span>
+                </div>
               </div>
-              <div class="station-stat">
-                <span>Points</span>
-                <strong data-station-points>0</strong>
+
+              <div class="station-arcade__main">
+                <section class="station-preview-bay">
+                  <div class="station-preview-bay__label">Current Ship</div>
+                  <div class="station-preview-bay__frame">
+                    <canvas
+                      class="station-preview-bay__canvas"
+                      aria-label="Current ship preview"
+                      data-station-preview-canvas
+                    ></canvas>
+                  </div>
+                  <div class="station-preview-bay__caption">
+                    <span>Scavenger Mk.I</span>
+                    <strong>Field Retrofit Hull</strong>
+                  </div>
+                </section>
+
+                <section class="station-briefing">
+                  <p class="station-briefing__eyebrow">Selected Upgrade</p>
+                  <h3 class="station-briefing__title" data-station-feature-title>Cargo expansion rack installed</h3>
+                  <p class="station-briefing__line" data-station-feature-line>Level 0 // cargo hold operating at 1 slot.</p>
+                  <p class="station-briefing__copy" data-station-feature-copy>
+                    Add one salvage slot per install to stay longer in hostile sectors before banking your run.
+                  </p>
+                  <div class="station-briefing__forecast">
+                    <span>Upgrade prices</span>
+                    <strong data-station-cargo-forecast>2 slots / 200 pts  •  3 slots / 400 pts  •  4 slots / 800 pts</strong>
+                  </div>
+                </section>
+
+                <aside class="station-stats-rail">
+                  <div class="station-stats-rail__item">
+                    <span>Cargo hold</span>
+                    <strong data-station-cargo>0 / 1</strong>
+                  </div>
+                  <div class="station-stats-rail__item">
+                    <span>Banked points</span>
+                    <strong data-station-points>0</strong>
+                  </div>
+                  <div class="station-stats-rail__item">
+                    <span>Shield integrity</span>
+                    <strong data-station-shield>100%</strong>
+                  </div>
+                  <div class="station-stats-rail__item">
+                    <span>Cargo level</span>
+                    <strong data-station-cargo-level>LVL 0</strong>
+                  </div>
+                  <div class="station-stats-rail__item">
+                    <span>Installed capacity</span>
+                    <strong data-station-cargo-capacity>1 slot</strong>
+                  </div>
+                  <div class="station-stats-rail__item">
+                    <span>Next cargo slot</span>
+                    <strong data-station-cargo-cost>200 pts</strong>
+                  </div>
+                </aside>
               </div>
-              <div class="station-stat">
-                <span>Shield</span>
-                <strong data-station-shield>100%</strong>
+
+              <div class="station-ribbon">
+                <button class="shop-card shop-card--active" type="button" data-upgrade-cargo>
+                  <span class="shop-card__label">Cargo</span>
+                  <strong class="shop-card__value">Install cargo slot</strong>
+                </button>
+                <button class="shop-card shop-card--locked" type="button" disabled>
+                  <span class="shop-card__label">Shields</span>
+                  <strong class="shop-card__value">Offline</strong>
+                </button>
+                <button class="shop-card shop-card--locked" type="button" disabled>
+                  <span class="shop-card__label">Weapons</span>
+                  <strong class="shop-card__value">Offline</strong>
+                </button>
+                <button class="shop-card" type="button" data-sell-salvage>
+                  <span class="shop-card__label">Sell</span>
+                  <strong class="shop-card__value">Bank salvage</strong>
+                </button>
+                <button class="shop-card" type="button" data-repair-shields>
+                  <span class="shop-card__label">Repair</span>
+                  <strong class="shop-card__value">Restore shields</strong>
+                </button>
+                <button class="shop-card shop-card--launch" type="button" data-undock>
+                  <span class="shop-card__label">Launch</span>
+                  <strong class="shop-card__value">Return to sector</strong>
+                </button>
               </div>
-            </div>
-            <p class="station-note" data-station-message>Sell salvage for points or repair shields.</p>
-            <div class="station-actions">
-              <button class="overlay__action" type="button" data-sell-salvage>Sell salvage</button>
-              <button class="overlay__action" type="button" data-repair-shields>Repair shields</button>
-              <button class="overlay__action overlay__action--ghost" type="button" data-undock>Undock</button>
+
+              <div class="station-ticker" data-station-message>Sell salvage for points or repair shields.</div>
             </div>
           </div>
         </div>

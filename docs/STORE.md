@@ -112,7 +112,7 @@ Store implications:
 
 ### 2. Cargo
 
-- The player starts with 3 cargo slots.
+- The player starts with 1 cargo slot.
 - Cargo upgrades increase maximum salvage capacity by one slot each level.
 - Each next cargo slot costs 2x more than the previous one.
 
@@ -122,6 +122,7 @@ Store implications:
 
 - base UI must show current cargo capacity
 - salvage pickup logic must respect capacity
+- if cargo is full, salvage stays in space and the player gets a status warning
 - HUD must show current cargo and max cargo
 
 ### 3. Weapons

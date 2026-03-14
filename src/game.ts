@@ -1098,18 +1098,31 @@ export class Aster3DGame {
       return;
     }
 
+    const lostSalvage = this.collectedSalvage;
+    this.collectedSalvage = 0;
     this.lives -= 1;
     if (this.lives <= 0) {
       this.lives = 0;
       this.gameOver = true;
       this.hud.overlay.classList.remove("hidden");
       this.hud.finalScore.textContent = `Final points: ${this.score}`;
-      this.setStatus("Hull integrity lost. Press R to relaunch.", 999);
+      this.setStatus(
+        lostSalvage > 0
+          ? `Hull integrity lost. Lost ${lostSalvage} salvage. Press R to relaunch.`
+          : "Hull integrity lost. Press R to relaunch.",
+        999,
+      );
       return;
     }
 
-    this.setStatus(`Ship lost. ${this.lives} lives remaining. Relaunching...`, 1.8);
-    this.resetShipState(true);
+    this.resetShipState(false);
+    this.dockShipAtBase(
+      lostSalvage > 0
+        ? `Hull repaired. Lost ${lostSalvage} salvage in the field.`
+        : "Hull repaired. Ship returned to dock.",
+      `Ship lost. ${this.lives} lives remaining. Relaunch complete.`,
+    );
+    this.syncWorldSectors();
   }
 
   private syncWorldSectors(): void {
@@ -1347,14 +1360,13 @@ export class Aster3DGame {
     this.stationOpen = false;
     this.hud.overlay.classList.add("hidden");
     this.stationUi.overlay.classList.add("hidden");
-    this.setStatus("Click to engage cockpit controls", 1.8);
     this.clearWorld();
     this.resetShipState(false);
+    this.dockShipAtBase("Sell salvage for points or repair shields.", "Docked at Frontier Station");
     this.spawnNextObjective(this.shipRoot.position.clone(), true);
     this.syncWorldSectors();
     this.clearBullets();
     this.clearExplosions();
-    this.updateStationUi("Sell salvage for points or repair shields.");
     this.updateHud();
   }
 
@@ -1835,20 +1847,25 @@ export class Aster3DGame {
   }
 
   private openStation(): void {
+    this.dockShipAtBase("Docking clamps engaged.", "Docked at Frontier Station");
+  }
+
+  private dockShipAtBase(message: string, status: string): void {
     this.autoDockActive = false;
     this.autoDockStage = 0;
     this.autoDockProgress = 0;
     this.autoDockDuration = 0;
+    this.baseDockRearmRequired = false;
     this.stationOpen = true;
     this.keys.clear();
-    this.shipVelocity.scaleInPlace(0);
+    this.shipVelocity.setAll(0);
     this.shipRoot.position.copyFrom(this.getBaseDockPosition());
     this.stationUi.overlay.classList.remove("hidden");
     if (document.pointerLockElement === this.canvas) {
       document.exitPointerLock();
     }
-    this.updateStationUi("Docking clamps engaged.");
-    this.setStatus("Docked at Frontier Station", 999);
+    this.updateStationUi(message);
+    this.setStatus(status, 999);
   }
 
   private closeStation(): void {

@@ -2,6 +2,7 @@ import { PreviewEntry, PreviewFactoryContext, PreviewHandle, PreviewObjectId } f
 import { createAsteroidPreview } from "./previews/asteroidPreview";
 import { createBasePreview } from "./previews/basePreview";
 import { createEnemyPreview } from "./previews/enemyPreview";
+import { createShipPreview } from "./previews/shipPreview";
 
 type PreviewDefinition = {
   entry: PreviewEntry;
@@ -42,16 +43,27 @@ const PREVIEW_REGISTRY: Record<PreviewObjectId, PreviewDefinition> = {
     },
     create: createBasePreview,
   },
+  ship: {
+    entry: {
+      id: "ship",
+      title: "Scavenger Mk.I",
+      eyebrow: "Object Preview",
+      description:
+        "The current player ship. A compact retrofit hull with a canopy animation and exposed engine assemblies used throughout the docking sequence.",
+      hint: "Drag to inspect the hull silhouette and engine section from different angles.",
+    },
+    create: createShipPreview,
+  },
 };
 
 export function resolvePreviewObjectId(params: URLSearchParams): PreviewObjectId | null {
   const direct = params.get("preview");
-  if (direct === "enemy" || direct === "asteroid" || direct === "base") {
+  if (direct === "enemy" || direct === "asteroid" || direct === "base" || direct === "ship") {
     return direct;
   }
 
   const legacy = params.get("bestiary");
-  if (legacy === "enemy" || legacy === "asteroid" || legacy === "base") {
+  if (legacy === "enemy" || legacy === "asteroid" || legacy === "base" || legacy === "ship") {
     return legacy;
   }
 

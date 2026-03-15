@@ -15,6 +15,10 @@ import { Scene } from "@babylonjs/core/scene";
 import { LoadedAsteroidAsset, loadAsteroidAsset } from "./asteroidAsset";
 import { createAsteroidPresentation } from "./asteroidPresentation";
 import { AudioManager } from "./audio";
+import { DockedShipDockingController } from "./dockedShipDockingController";
+import { DockedShipDockingControllerFactory } from "./dockedShipDockingControllerFactory";
+import type { LoadedDockedShipAsset } from "./dockedShipAsset";
+import { GOLDEN_VECTOR_DOCKED_SHIP_PROFILE } from "./dockedShipProfiles";
 import { EnemyEngineGlow, createEnemyPresentation, updateEnemyEngineGlows } from "./enemyPresentation";
 import { LoadedSpaceStationAsset, loadSpaceStationAsset } from "./spaceStationAsset";
 import { LoadedSpacecraftAsset, loadSpacecraftAsset } from "./spacecraftAsset";
@@ -51,6 +55,7 @@ type Explosion = {
 
 type HudRefs = {
   cockpitOverlay: HTMLCanvasElement;
+  reticle: HTMLElement;
   score: HTMLElement;
   lives: HTMLElement;
   shield: HTMLElement;
@@ -246,6 +251,8 @@ export class Aster3DGame {
   private readonly engine: Engine;
   private readonly scene: Scene;
   private readonly camera: UniversalCamera;
+  private readonly dockedShipDockingController: DockedShipDockingController;
+  private readonly dockedShipProfile = GOLDEN_VECTOR_DOCKED_SHIP_PROFILE;
   private readonly shipRoot: TransformNode;
   private readonly starfieldRoot: TransformNode;
   private readonly baseRoot: TransformNode;
@@ -276,6 +283,7 @@ export class Aster3DGame {
   private gameOver = false;
   private settingsOpen = false;
   private stationOpen = false;
+  private stationArrivalInProgress = false;
   private autoDockActive = false;
   private autoDockStage = 0;
   private autoDockProgress = 0;
@@ -312,6 +320,7 @@ export class Aster3DGame {
   private objectiveDirection = new Vector3(0.24, 0.08, 0.97).normalize();
   private asteroidModelAsset: LoadedAsteroidAsset | null = null;
   private enemyModelAsset: LoadedSpacecraftAsset | null = null;
+  private dockedShipModelAsset: LoadedDockedShipAsset | null = null;
   private stationModelAsset: LoadedSpaceStationAsset | null = null;
   private activeBaseDockNode: TransformNode | null = null;
   private readonly enemyHudMarkers: EnemyHudMarker[] = [];
@@ -326,6 +335,7 @@ export class Aster3DGame {
     this.canvas = this.requireElement<HTMLCanvasElement>(root, ".game-canvas");
     this.hud = {
       cockpitOverlay: this.requireElement(root, "[data-cockpit-overlay]"),
+      reticle: this.requireElement(root, ".reticle"),
       score: this.requireElement(root, "[data-score]"),
       lives: this.requireElement(root, "[data-lives]"),
       shield: this.requireElement(root, "[data-shield]"),
@@ -404,6 +414,14 @@ export class Aster3DGame {
     this.camera.minZ = 0.05;
     this.camera.fov = 1;
     this.scene.activeCamera = this.camera;
+    this.dockedShipDockingController = DockedShipDockingControllerFactory.create({
+      scene: this.scene,
+      shipRoot: this.shipRoot,
+      flightCamera: this.camera,
+      cockpitOverlay: this.hud.cockpitOverlay,
+      reticle: this.hud.reticle,
+      profile: this.dockedShipProfile,
+    });
 
     this.starfieldRoot = new TransformNode("starfieldRoot", this.scene);
     this.baseRoot = new TransformNode("baseRoot", this.scene);
@@ -418,8 +436,10 @@ export class Aster3DGame {
   private async initialize(): Promise<void> {
     await Promise.all([
       this.loadAsteroidModelPrefab(),
+      this.loadDockedShipModelPrefab(),
       this.loadEnemyModelPrefab(),
       this.loadStationModelPrefab(),
+      this.stationPreview.setShipProfile(this.dockedShipProfile),
     ]);
     this.createBase();
     this.resetRun();
@@ -600,7 +620,10 @@ export class Aster3DGame {
   }
 
   private update(dt: number): void {
-    if (this.settingsOpen || this.stationOpen) {
+    if (this.settingsOpen || this.stationOpen || this.stationArrivalInProgress) {
+      if (this.stationOpen || this.stationArrivalInProgress) {
+        this.dockedShipDockingController.update(dt, this.getBaseDockPosition());
+      }
       this.updateBaseVisuals(dt);
       this.updateHud();
       return;
@@ -643,6 +666,9 @@ export class Aster3DGame {
     this.updateObjective(dt);
     this.updateExplosions(dt);
     this.updateBaseVisuals(dt);
+    if (this.autoDockActive) {
+      this.dockedShipDockingController.update(dt, this.getBaseDockPosition());
+    }
 
     this.starfieldRoot.position.copyFrom(this.shipRoot.position);
     this.updateHud();
@@ -1167,6 +1193,18 @@ export class Aster3DGame {
     }
   }
 
+  private async loadDockedShipModelPrefab(): Promise<void> {
+    try {
+      this.dockedShipModelAsset?.dispose();
+      this.dockedShipModelAsset = await this.dockedShipProfile.loadAsset(this.scene);
+      this.dockedShipDockingController.setAsset(this.dockedShipModelAsset);
+    } catch (error) {
+      console.warn("Failed to load docked ship model, using camera-only station view.", error);
+      this.dockedShipModelAsset = null;
+      this.dockedShipDockingController.setAsset(null);
+    }
+  }
+
   private async loadStationModelPrefab(): Promise<void> {
     try {
       this.stationModelAsset?.dispose();
@@ -1234,6 +1272,7 @@ export class Aster3DGame {
         ? `Hull repaired. Lost ${lostSalvage} salvage in the field.`
         : "Hull repaired. Ship returned to dock.",
       `Ship lost. ${this.lives} lives remaining. Relaunch complete.`,
+      { playArrivalAnimation: false },
     );
     this.syncWorldSectors();
   }
@@ -1498,11 +1537,14 @@ export class Aster3DGame {
     this.worldSeed = Math.random();
     this.objectiveDirection = new Vector3(0.24, 0.08, 0.97).normalize();
     this.stationOpen = false;
+    this.stationArrivalInProgress = false;
     this.hud.overlay.classList.add("hidden");
     this.stationUi.overlay.classList.add("hidden");
     this.clearWorld();
     this.resetShipState(false);
-    this.dockShipAtBase("Sell salvage for points or repair shields.", "Docked at Frontier Station");
+    this.dockShipAtBase("Sell salvage for points or repair shields.", "Docked at Frontier Station", {
+      playArrivalAnimation: false,
+    });
     this.spawnNextObjective(this.shipRoot.position.clone(), true);
     this.syncWorldSectors();
     this.clearBullets();
@@ -1878,11 +1920,13 @@ export class Aster3DGame {
   private startAutoDock(): void {
     this.updateActiveBaseDock(this.shipRoot.position);
     this.autoDockActive = true;
+    this.stationArrivalInProgress = false;
     this.beginAutoDockStage(0);
     this.keys.clear();
     if (document.pointerLockElement === this.canvas) {
       document.exitPointerLock();
     }
+    this.dockedShipDockingController.showDockingView();
     this.setStatus("Station field captured. Autodocking...", 999);
   }
 
@@ -2207,39 +2251,59 @@ export class Aster3DGame {
   }
 
   private openStation(): void {
-    this.dockShipAtBase("Docking clamps engaged.", "Docked at Frontier Station");
+    this.dockShipAtBase("Docking clamps engaged.", "Docked at Frontier Station", { playArrivalAnimation: true });
   }
 
-  private dockShipAtBase(message: string, status: string): void {
+  private dockShipAtBase(message: string, status: string, options?: { playArrivalAnimation?: boolean }): void {
     this.updateActiveBaseDock(this.shipRoot.position);
     this.autoDockActive = false;
     this.autoDockStage = 0;
     this.autoDockProgress = 0;
     this.autoDockDuration = 0;
     this.baseDockRearmRequired = false;
-    this.stationOpen = true;
+    this.stationOpen = false;
+    this.stationArrivalInProgress = options?.playArrivalAnimation ?? false;
     this.keys.clear();
     this.shipVelocity.setAll(0);
     this.shipRoot.position.copyFrom(this.getBaseDockPosition());
     this.alignShipToBaseDock();
-    this.stationUi.overlay.classList.remove("hidden");
+    this.dockedShipDockingController.showDockingView();
+    this.stationUi.overlay.classList.add("hidden");
     if (document.pointerLockElement === this.canvas) {
       document.exitPointerLock();
     }
-    this.updateStationUi(message);
-    this.setStatus(status, 999);
+    if (this.stationArrivalInProgress) {
+      this.setStatus("Docking clamps engaged.", 999);
+      this.dockedShipDockingController.beginArrivalSequence(() => {
+        this.finishDockingSequence(message, status);
+      });
+      return;
+    }
+
+    this.finishDockingSequence(message, status);
   }
 
   private closeStation(): void {
     this.stationOpen = false;
+    this.stationArrivalInProgress = false;
     this.autoDockActive = false;
     this.autoDockStage = 0;
     this.autoDockProgress = 0;
     this.autoDockDuration = 0;
     this.baseDockRearmRequired = true;
     this.shipVelocity.scaleInPlace(0);
+    this.alignShipForBaseLaunch();
     this.stationUi.overlay.classList.add("hidden");
+    this.dockedShipDockingController.hideDockingView();
     this.setStatus("Docking clamps released. Throttle up to depart.", 1.8);
+  }
+
+  private finishDockingSequence(message: string, status: string): void {
+    this.stationArrivalInProgress = false;
+    this.stationOpen = true;
+    this.stationUi.overlay.classList.remove("hidden");
+    this.updateStationUi(message);
+    this.setStatus(status, 999);
   }
 
   private updateStationUi(message?: string): void {
@@ -2650,6 +2714,9 @@ export class Aster3DGame {
     this.clearWorld();
     this.asteroidModelAsset?.dispose();
     this.asteroidModelAsset = null;
+    this.dockedShipDockingController.dispose();
+    this.dockedShipModelAsset?.dispose();
+    this.dockedShipModelAsset = null;
     this.enemyModelAsset?.dispose();
     this.enemyModelAsset = null;
     this.stationModelAsset?.dispose();
@@ -2658,6 +2725,17 @@ export class Aster3DGame {
     this.scene.dispose();
     this.engine.dispose();
     this.audio.dispose();
+  }
+
+  private alignShipForBaseLaunch(): void {
+    const launchDirection = this.getBaseEntryPosition().subtract(this.getBaseDockPosition());
+    if (launchDirection.lengthSquared() < 0.001) {
+      return;
+    }
+
+    this.shipRoot.rotationQuaternion = this.scene.useRightHandedSystem
+      ? Quaternion.FromLookDirectionRH(launchDirection.normalize().scale(-1), Vector3.Up())
+      : Quaternion.FromLookDirectionLH(launchDirection.normalize().scale(-1), Vector3.Up());
   }
 
   private hasActivePointerLock(): boolean {

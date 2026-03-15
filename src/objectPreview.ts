@@ -148,6 +148,13 @@ export class ObjectPreviewViewer {
       return;
     }
 
+    if (objectId === "ship") {
+      this.camera.radius = 14;
+      this.camera.lowerRadiusLimit = 8;
+      this.camera.upperRadiusLimit = 26;
+      return;
+    }
+
     this.camera.radius = 32;
     this.camera.lowerRadiusLimit = 16;
     this.camera.upperRadiusLimit = 72;

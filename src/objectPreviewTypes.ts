@@ -1,7 +1,7 @@
 import { Scene } from "@babylonjs/core/scene";
 import { TransformNode } from "@babylonjs/core/Meshes/transformNode";
 
-export type PreviewObjectId = "enemy" | "asteroid" | "base";
+export type PreviewObjectId = "enemy" | "asteroid" | "base" | "ship";
 
 export type PreviewEntry = {
   id: PreviewObjectId;

@@ -20,6 +20,7 @@ import { DockedShipDockingControllerFactory } from "./dockedShipDockingControlle
 import type { LoadedDockedShipAsset } from "./dockedShipAsset";
 import { GOLDEN_VECTOR_DOCKED_SHIP_PROFILE } from "./dockedShipProfiles";
 import { EnemyEngineGlow, createEnemyPresentation, updateEnemyEngineGlows } from "./enemyPresentation";
+import { instantiateSpaceStationVisual, updateSpaceStationRotatingNodes } from "./spaceStationPresentation";
 import { LoadedSpaceStationAsset, loadSpaceStationAsset } from "./spaceStationAsset";
 import { LoadedSpacecraftAsset, loadSpacecraftAsset } from "./spacecraftAsset";
 import { StationShipPreview } from "./stationShipPreview";
@@ -224,7 +225,6 @@ const BASE_AUTODOCK_PATH_MARGIN = 10;
 const BASE_AUTODOCK_STAGE0_CONTROL_HEIGHT = 2.5;
 const BASE_AUTODOCK_STAGE1_CONTROL_HEIGHT = 0.6;
 const BASE_AUTODOCK_STAGE2_CONTROL_HEIGHT = 0.35;
-const BASE_BLOCK_ROTATION_SPEED = 0.04;
 const BASE_SAFE_RADIUS = 92;
 const BASE_AUTODOCK_STAGE0_ARC_RADIUS = BASE_SAFE_RADIUS - BASE_AUTODOCK_PATH_MARGIN - 4;
 const BASE_ENEMY_AVOID_RADIUS = BASE_SAFE_RADIUS + 18;
@@ -1887,10 +1887,6 @@ export class Aster3DGame {
       : Quaternion.FromLookDirectionLH(launchDirection.normalize(), Vector3.Up());
   }
 
-  private hasImportedNodeName(nodeName: string, sourceName: string): boolean {
-    return nodeName === sourceName || nodeName.startsWith(`${sourceName}-`);
-  }
-
   private isInsideBaseShield(position: Vector3): boolean {
     return Vector3.DistanceSquared(position, this.baseRoot.position) <= BASE_SAFE_RADIUS * BASE_SAFE_RADIUS;
   }
@@ -2043,15 +2039,7 @@ export class Aster3DGame {
       this.baseChevronMaterials[index].alpha = 0.54 + glow * 0.26;
     }
 
-    for (const rotatingNode of this.baseRotatingNodes) {
-      const currentRotation = rotatingNode.rotationQuaternion ?? Quaternion.FromEulerAngles(
-        rotatingNode.rotation.x,
-        rotatingNode.rotation.y,
-        rotatingNode.rotation.z,
-      );
-      const deltaRotation = Quaternion.FromEulerAngles(0, 0, BASE_BLOCK_ROTATION_SPEED * dt);
-      rotatingNode.rotationQuaternion = currentRotation.multiply(deltaRotation).normalize();
-    }
+    updateSpaceStationRotatingNodes(this.baseRotatingNodes, dt);
   }
 
   private createBase(): void {
@@ -2086,45 +2074,17 @@ export class Aster3DGame {
     shield.material = shieldMaterial;
 
     if (this.stationModelAsset) {
-      const stationRoot = new TransformNode("base-station-visual-root", this.scene);
-      stationRoot.parent = this.baseRoot;
-      stationRoot.scaling.setAll(BASE_STATION_MODEL_SCALE);
-
-      const instance = this.stationModelAsset.prefab.instantiateModelsToScene(
-        (sourceName) => `${sourceName}-${performance.now()}`,
-        false,
-        { doNotInstantiate: true },
+      const stationVisual = instantiateSpaceStationVisual(
+        this.scene,
+        this.baseRoot,
+        this.stationModelAsset,
+        "base-station-visual-root",
       );
+      stationVisual.root.scaling.setAll(BASE_STATION_MODEL_SCALE);
+      this.baseRotatingNodes.push(...stationVisual.rotatingNodes);
+      this.baseCollisionMeshes.push(...stationVisual.collisionMeshes);
 
-      for (const node of instance.rootNodes) {
-        node.parent = stationRoot;
-      }
-
-      const rotatingBlock = stationRoot
-        .getChildTransformNodes(false)
-        .find((node) => this.hasImportedNodeName(node.name, "Blocks01_block_0")) ?? null;
-      if (rotatingBlock) {
-        this.baseRotatingNodes.push(rotatingBlock);
-      }
-
-      for (const mesh of stationRoot.getChildMeshes()) {
-        const materialEntry = [...this.stationModelAsset.materialsByMeshName.entries()].find(([sourceName]) =>
-          this.hasImportedNodeName(mesh.name, sourceName)
-        );
-        mesh.material = materialEntry?.[1] ?? null;
-        if (mesh.getTotalVertices() > 0) {
-          this.baseCollisionMeshes.push(mesh);
-        }
-      }
-
-      for (const dockName of ["dock_1", "dock_2"]) {
-        const dockNode = stationRoot
-          .getChildTransformNodes(false)
-          .find((node) => this.hasImportedNodeName(node.name, dockName)) ?? null;
-        if (!dockNode) {
-          continue;
-        }
-
+      for (const dockNode of stationVisual.dockNodes) {
         this.baseDockNodes.push(dockNode);
 
         const chevronMaterial = new StandardMaterial(`base-chevron-${dockNode.name}`, this.scene);

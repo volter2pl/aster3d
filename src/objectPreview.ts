@@ -29,10 +29,23 @@ const VIEWER_SUNLIGHT_DIRECTION = new Vector3(0.78, -0.28, -0.56).normalize();
 export class ObjectPreviewViewer {
   private readonly actionsHost: HTMLElement;
   private readonly canvas: HTMLCanvasElement;
+  private readonly creditsModal: HTMLElement | null;
+  private readonly creditsOpenButton: HTMLButtonElement | null;
   private readonly engine: Engine;
   private readonly scene: Scene;
   private readonly camera: ArcRotateCamera;
   private readonly rootNode: TransformNode;
+  private readonly creditsCloseHandler = (event: Event): void => {
+    const target = event.target as HTMLElement | null;
+    if (!target?.closest("[data-preview-credits-close]")) {
+      return;
+    }
+
+    this.closeCredits();
+  };
+  private readonly creditsOpenHandler = (): void => {
+    this.openCredits();
+  };
   private readonly actionsClickHandler = (event: Event): void => {
     const target = (event.target as HTMLElement | null)?.closest<HTMLButtonElement>("[data-preview-action]");
     if (!target || !this.handle) {
@@ -54,6 +67,12 @@ export class ObjectPreviewViewer {
   private readonly resizeHandler = (): void => {
     this.engine.resize();
   };
+  private readonly keyDownHandler = (event: Event): void => {
+    const keyboardEvent = event as KeyboardEvent;
+    if (keyboardEvent.code === "Escape" && this.creditsModal && !this.creditsModal.classList.contains("hidden")) {
+      this.closeCredits();
+    }
+  };
 
   private handle: PreviewHandle | null = null;
   private lastFrameTime = 0;
@@ -74,6 +93,8 @@ export class ObjectPreviewViewer {
 
     this.canvas = canvas;
     this.actionsHost = actionsHost;
+    this.creditsModal = root.querySelector<HTMLElement>("[data-preview-credits-modal]");
+    this.creditsOpenButton = root.querySelector<HTMLButtonElement>("[data-preview-credits-open]");
     this.engine = new Engine(this.canvas, true);
     this.scene = new Scene(this.engine);
     this.scene.clearColor = new Color4(0.008, 0.015, 0.04, 1);
@@ -106,8 +127,11 @@ export class ObjectPreviewViewer {
     this.rootNode = new TransformNode("preview-root", this.scene);
 
     this.actionsHost.addEventListener("click", this.actionsClickHandler);
+    this.creditsModal?.addEventListener("click", this.creditsCloseHandler);
+    this.creditsOpenButton?.addEventListener("click", this.creditsOpenHandler);
     this.canvas.addEventListener("contextmenu", this.preventContextMenu);
     window.addEventListener("resize", this.resizeHandler);
+    window.addEventListener("keydown", this.keyDownHandler);
   }
 
   private async initialize(options: ObjectPreviewViewerOptions): Promise<void> {
@@ -185,11 +209,22 @@ export class ObjectPreviewViewer {
 
     this.disposed = true;
     this.actionsHost.removeEventListener("click", this.actionsClickHandler);
+    this.creditsModal?.removeEventListener("click", this.creditsCloseHandler);
+    this.creditsOpenButton?.removeEventListener("click", this.creditsOpenHandler);
     this.canvas.removeEventListener("contextmenu", this.preventContextMenu);
     window.removeEventListener("resize", this.resizeHandler);
+    window.removeEventListener("keydown", this.keyDownHandler);
     this.handle?.dispose();
     this.handle = null;
     this.scene.dispose();
     this.engine.dispose();
+  }
+
+  private closeCredits(): void {
+    this.creditsModal?.classList.add("hidden");
+  }
+
+  private openCredits(): void {
+    this.creditsModal?.classList.remove("hidden");
   }
 }

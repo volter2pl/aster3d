@@ -17,6 +17,7 @@ import {
   resolvePreviewObjectId,
   type PreviewObjectId,
 } from "./objectPreview";
+import { getPreviewCredits } from "./objectPreviewCredits";
 import { Aster3DGame } from "./game";
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -262,6 +263,8 @@ function renderGameShell(): void {
 
 function renderObjectPreviewShell(objectId: PreviewObjectId): void {
   const entry = getPreviewEntry(objectId);
+  const credits = getPreviewCredits(objectId);
+  const hasCredits = credits.length > 0;
   const objectLinks = listPreviewEntries()
     .map((candidate) => {
       const activeClass = candidate.id === objectId ? " viewer-nav__link--active" : "";
@@ -279,11 +282,68 @@ function renderObjectPreviewShell(objectId: PreviewObjectId): void {
         </div>
       `
       : "";
+  const creditsButton = hasCredits
+    ? `
+        <button class="viewer-info-button" type="button" data-preview-credits-open aria-label="Open asset credits">
+          i
+        </button>
+      `
+    : "";
+  const creditsModal = hasCredits
+    ? `
+        <div class="viewer-credits hidden" data-preview-credits-modal>
+          <div class="viewer-credits__backdrop" data-preview-credits-close></div>
+          <div class="overlay__card viewer-credits__card" role="dialog" aria-modal="true" aria-labelledby="viewer-credits-title">
+            <div class="viewer-credits__header">
+              <div>
+                <p class="overlay__eyebrow viewer-panel__eyebrow">Credits</p>
+                <h2 id="viewer-credits-title">3D Asset Credits</h2>
+              </div>
+              <button class="viewer-credits__close" type="button" data-preview-credits-close aria-label="Close credits">
+                Close
+              </button>
+            </div>
+            <div class="viewer-credits__list">
+              ${credits
+                .map(
+                  (credit) => `
+                    <section class="viewer-credits__item">
+                      ${credit.relationLabel ? `<div class="viewer-credits__eyebrow">${credit.relationLabel}</div>` : ""}
+                      <h3>${credit.title}</h3>
+                      ${
+                        credit.creatorName
+                          ? `<p>Author: ${
+                              credit.creatorUrl
+                                ? `<a href="${credit.creatorUrl}" target="_blank" rel="noreferrer">${credit.creatorName}</a>`
+                                : credit.creatorName
+                            }</p>`
+                          : ""
+                      }
+                      <p>Source: <a href="${credit.sourceUrl}" target="_blank" rel="noreferrer">${credit.sourceLabel}</a></p>
+                      ${
+                        credit.licenseName
+                          ? `<p>License: <a href="${credit.licenseUrl}" target="_blank" rel="noreferrer">${credit.licenseName}</a></p>`
+                          : ""
+                      }
+                      ${credit.changes ? `<p>${credit.changes}</p>` : ""}
+                      ${credit.notes ? `<p class="viewer-credits__note">${credit.notes}</p>` : ""}
+                    </section>
+                  `,
+                )
+                .join("")}
+            </div>
+          </div>
+        </div>
+      `
+    : "";
 
   root.innerHTML = `
     <div class="viewer-shell">
       <aside class="viewer-panel">
-        <p class="overlay__eyebrow viewer-panel__eyebrow">${entry.eyebrow}</p>
+        <div class="viewer-panel__topbar">
+          <p class="overlay__eyebrow viewer-panel__eyebrow">${entry.eyebrow}</p>
+          ${creditsButton}
+        </div>
         <h1 class="viewer-panel__title">${entry.title}</h1>
         <p class="viewer-panel__description">${entry.description}</p>
         <p class="viewer-panel__hint">${entry.hint}</p>
@@ -299,6 +359,7 @@ function renderObjectPreviewShell(objectId: PreviewObjectId): void {
       <div class="viewer-stage">
         <canvas class="game-canvas viewer-canvas" aria-label="Object preview" data-preview-canvas></canvas>
       </div>
+      ${creditsModal}
     </div>
   `;
 }
